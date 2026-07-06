@@ -1,0 +1,29 @@
+mod/
+outputs/
+DAPI_images/
+artifacts/
+artifact_annotations/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Generated logs and QC/validation output (regenerable by re-running the scripts)
+*.log
+test/qc_overlays/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings (machine-specific, not shared)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
