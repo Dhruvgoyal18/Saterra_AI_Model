@@ -1,0 +1,8 @@
+{
+  "tile_size": 64,
+  "tau": 0.5,
+  "background_threshold": 0.5,
+  "intensity_low_pctile": 1.0,
+  "intensity_high_pctile": 99.0,
+  "model": "SmallCNN (3 conv blocks, in_channels=1)"
+}

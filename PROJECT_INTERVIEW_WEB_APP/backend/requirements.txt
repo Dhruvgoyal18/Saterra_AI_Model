@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi
+uvicorn[standard]
+huggingface_hub
+pydantic-settings
+python-multipart
+numpy
+scipy
+tifffile
+imagecodecs
+torch
