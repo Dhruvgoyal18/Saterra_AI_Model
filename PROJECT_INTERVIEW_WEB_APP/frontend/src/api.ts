@@ -1,3 +1,4 @@
+import { supabase } from "./supabaseClient";
 import type { DetectResponse, ImagesResponse } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010";
@@ -8,12 +9,38 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010
 // network failure; the UI shows a "waking up" message while it waits (App.tsx).
 const DETECT_TIMEOUT_MS = 120_000;
 
-export function displayImageUrl(imageId: string): string {
-  return `${API_BASE_URL}/images/${imageId}/display`;
+// Read the session token fresh, right before each call, rather than caching
+// it once at login -- Supabase access tokens expire (1hr default) and the
+// client auto-refreshes the underlying session, so capturing the string
+// once would silently start failing with 401s an hour into a session.
+async function authHeaders(): Promise<Record<string, string>> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) {
+    throw new Error("Not signed in");
+  }
+  return { Authorization: `Bearer ${session.access_token}` };
+}
+
+// Every image/detect endpoint is gated behind Supabase auth (see backend's
+// require_user) -- but a plain <img src=...> / new Image() load can't carry
+// a custom Authorization header, so the display image is fetched here with
+// the header attached and handed to the caller as an object URL instead.
+// Caller is responsible for URL.revokeObjectURL() when done with it.
+export async function fetchDisplayImageObjectUrl(imageId: string): Promise<string> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE_URL}/images/${imageId}/display`, { headers });
+  if (!res.ok) {
+    throw new Error(`Failed to load display image: ${res.status} ${res.statusText}`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 export async function fetchImages(): Promise<ImagesResponse> {
-  const res = await fetch(`${API_BASE_URL}/images`);
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE_URL}/images`, { headers });
   if (!res.ok) {
     throw new Error(`Failed to list images: ${res.status} ${res.statusText}`);
   }
@@ -25,9 +52,10 @@ export async function detectArtifacts(imageId: string): Promise<DetectResponse> 
   const timeoutId = setTimeout(() => controller.abort(), DETECT_TIMEOUT_MS);
 
   try {
+    const headers = { "Content-Type": "application/json", ...(await authHeaders()) };
     const res = await fetch(`${API_BASE_URL}/detect`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ image_id: imageId }),
       signal: controller.signal,
     });

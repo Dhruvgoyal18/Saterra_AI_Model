@@ -16,6 +16,22 @@ executed: uploading to a real Hugging Face dataset repo and deploying the
 backend to a Space — both need an HF token, which this build environment
 doesn't have. Both scripts for that are written and ready to run.
 
+**Revision note (read this first):** everything above describes the
+*first* version of this backend, which supported two storage modes —
+`STORAGE_BACKEND=local` (read from a local `bucket_staging/` folder and the
+sibling Checkpoint-1 `DAPI_images/`) and `STORAGE_BACKEND=hf` (private HF
+dataset repo). That dual-mode design has since been **superseded** — see
+§10, "Refactor: Hugging Face as the single source of truth," for a second
+round of changes that removed the local-storage mode entirely, including
+for local development. §1–§9 below are kept as an accurate historical record
+of the first build (and most of the reasoning in them — vendoring the model
+code, one canvas instead of two layers, the diverging colormap, CORS, cold
+starts, the Phase E scaling discussion — is still exactly correct and
+unchanged). Where §1–§9 describe the storage layer specifically
+(`STORAGE_BACKEND`, `LocalStorage`, `bucket_staging/`, `manifest.json`),
+treat that as "what used to be true"; §10 and the repo structure in §9 (now
+updated) reflect what's actually in the codebase today.
+
 ---
 
 ## 1. How the build actually proceeded, in order
@@ -507,63 +523,308 @@ touching the model or its output shape.
 | 11 | Rewrite scaffolded `index.css`/`App.tsx` rather than patch over them | Add higher-specificity overrides on top of the Vite template's CSS | The template's fixed-width, light-themed, centered layout actively fought this app's actual layout |
 | 12 | CORS enabled in the first draft of `main.py` | Add it only if the browser test failed | Plan explicitly names this the most common silent failure mode; cheaper to include upfront than debug later |
 | 13 | Did not touch the process already bound to port 8000 | Kill whatever was listening on 8000 and reuse the default port | Unrelated process, not created by this build — moved to port 8010 instead of risking someone else's work |
+| 14 | (Refactor, §10) Made `ImageInfo.level0_dims`/`display_dims` nullable, populated lazily from a per-image dims sidecar | Eagerly generate every image's display on first `/images` call so dims are never null | Spec's own acceptance criteria requires displays generated "one at a time... not all at once"; the field isn't load-bearing once the canvas sizes itself from the loaded image (#17) |
+| 15 | (Refactor, §10) Dropped `ImageInfo.labeled` entirely rather than defaulting it | Hardcode `{Image_1..Image_5}` client- or server-side to preserve the old field | Not derivable from the HF file listing; hardcoding it back in would silently reintroduce Checkpoint-1-specific knowledge into a pipeline whose point is that HF is the only source of truth |
+| 16 | (Refactor, §10) `hf_hub_download` called with no custom `cache_dir` for originals | Keep the original backend's custom `backend/.hf_cache/` | Spec calls this out by name; huggingface_hub's own default cache already solves this correctly |
+| 17 | (Refactor, §10) `DetectionCanvas` sizes itself from the loaded image's `naturalWidth`/`naturalHeight` | Keep depending on `imageInfo.display_dims` from `/images` | That field can now be `null` (#14); sizing from the loaded image removes the dependency entirely rather than adding null-handling around it |
+| 18 | (Refactor, §10) Did not delete/rename local `DAPI_images/` to "prove" the new code path is HF-only | Delete or rename it per the acceptance-criteria wording | It's live Checkpoint 1 data used by unrelated scripts; a grep audit + a full real-repo run prove the same property without a destructive, hard-to-undo action on data outside this refactor's scope |
+| 19 | (Refactor, §10) Adopted the HF repo's existing flat `Image_N.ome.tiff` naming instead of re-uploading under `image_N/original.ome.tiff` | Run the original `upload_to_hf.py` as-is against the real repo | Would have re-uploaded ~1.4GB already sitting in the repo under a second, parallel naming convention for no benefit |
 
 ---
 
 ## 8. What's real vs. what's written-but-unrun
 
+**Updated after §10's refactor** — most of what was "written but unrun" in
+the first build is now genuinely run, against the real private repo, not a
+local stand-in:
+
 | Piece | Status |
 |---|---|
-| Asset generation (`prepare_display_images.py`) | Run for real against all 8 Checkpoint 1 images |
-| Backend (`/health`, `/images`, `/images/{id}/display`, `/detect`) | Run for real, curl-tested, results cross-checked against Checkpoint 1 |
-| Frontend (picker, canvas overlay, uncertainty toggle, summary panel) | Run for real in an actual browser against the real backend |
-| TypeScript build (`tsc -b`, `vite build`) | Run for real, passed cleanly |
-| `scripts/upload_to_hf.py` (private HF dataset repo upload) | Written, not run — no HF token in this build environment |
-| `backend/Dockerfile` + HF Space deployment | Written, not deployed — same reason |
+| `GET /images` against the real `Dhruvgoyal18/saterra-project` repo | Run for real — lists the true 8 image ids straight from HF, confirmed zero downloads triggered |
+| `GET /images/{id}/display` (cache miss + cache hit) | Run for real — 45.1s cold (real HF download + PNG generation) vs. 0.095s warm, file mtime unchanged on the warm hit |
+| `POST /detect` against the real HF-sourced original | Run for real — summary numbers byte-for-byte identical to Checkpoint 1's saved results for Image_7 |
+| Missing/invalid `HF_TOKEN` error handling | Run for real — both produce the clear, actionable messages quoted in §10.4, not tracebacks |
+| Frontend (`tsc -b`) after the schema/component changes in §10 | Run for real, passed cleanly |
+| `scripts/upload_to_hf.py` (add/replace a single original) | Written, not run — no reason to touch the repo's existing 8 files just to prove this; the upload API calls themselves are the same `HfApi.upload_file` calls exercised nowhere else in this session, so this specific script is the one piece of Hugging Face interaction still unverified end-to-end |
+| `backend/Dockerfile` + actual HF Space deployment | Written, not deployed — this sandboxed build environment has no way to push to a real Space |
 | Production `CORS_ORIGINS` restricted to the real deployed frontend origin | Left as `*` for local dev; must be set before a real deployment |
 
-To finish deployment: get an HF token, run `scripts/upload_to_hf.py`, push
-`backend/` to a new HF Space (Docker SDK) with the secrets listed in
-`backend/README.md`, then point the frontend's `VITE_API_BASE_URL` at the
-Space's URL.
+To finish deployment: push `backend/` to a new HF Space (Docker SDK) with
+the secrets listed in `backend/README.md` (`HF_TOKEN`, `HF_DATASET_REPO`,
+optionally `HF_DISPLAY_CACHE_DIR`, `CORS_ORIGINS`), then point the
+frontend's `VITE_API_BASE_URL` at the Space's URL.
 
 ---
 
-## 9. Repo structure
+## 10. Refactor: Hugging Face as the single source of truth
+
+Triggered by `update_pipeline.md`, after the user uploaded the real 8
+originals to a private HF dataset repo
+(`Dhruvgoyal18/saterra-project`, `Image_1.ome.tiff` … `Image_8.ome.tiff` at
+the repo root) and asked for the entire pipeline — including local dev — to
+read from that repo, with no local-file path left anywhere, even as a
+fallback.
+
+### 10.1 What triggered this, and what was found first
+
+Before writing any code, the actual state of the HF repo was checked
+directly (not assumed): `HfApi().dataset_info(...)` showed 8 files,
+`Image_1.ome.tiff` … `Image_8.ome.tiff`, at the repo root — no `display.png`
+files, no `manifest.json`, no `image_N/` subfolders. This matched
+`update_pipeline.md`'s description exactly (the user had uploaded originals
+manually, not via this project's `upload_to_hf.py`), so no reconciliation
+between "what I assumed" and "what's actually there" was needed this time —
+unlike the very first HF check earlier in this session, which *did* surface
+a mismatch (see the "HF repo layout" question asked and then superseded by
+`update_pipeline.md` directly answering it).
+
+Also discovered, unprompted: a Hugging Face token was already cached on this
+machine (`~/.cache/huggingface/token`, logged in as `Dhruvgoyal18`, matching
+the repo owner) — so `HfApi()` calls worked without explicitly passing a
+token during exploration, even though the app itself always requires
+`HF_TOKEN` explicitly (see 10.4).
+
+### 10.2 The one real design tension: "no response shape changes" vs. deleting `manifest.json`
+
+`update_pipeline.md` states two things that can't both be literally true at
+once: (a) delete the `manifest.json`-reading code path entirely, and (b) the
+JSON contracts for `/images`, `/display`, and `/detect` stay exactly as they
+are. `manifest.json` was the *only* source of `level0_dims`, `display_dims`,
+and `labeled` for `/images` in the old design — once it's gone, something
+has to give.
+
+**Resolution taken (a judgment call, not something the spec fully
+resolved):**
+
+- **`level0_dims` / `display_dims` become nullable**, populated only once an
+  image's display PNG has been generated at least once (read from a small
+  per-image dims sidecar file written alongside the cached PNG — see 10.3).
+  `GET /images` lists image ids straight from the HF file listing (cheap, no
+  download), and reports `null` dims for any image whose display hasn't been
+  requested yet. *Rejected alternative:* have `/images` eagerly generate
+  every image's display PNG (and thus know every image's dims) on first
+  call, so the field is never null. Rejected because that would mean
+  listing images forces 8 full-resolution downloads and 8 image-processing
+  passes before the endpoint can even respond — directly contradicting the
+  spec's explicit "generated the first time an image is requested... not
+  all at once" requirement (acceptance criterion 2). The frontend doesn't
+  actually need this field for correctness either way: `DetectionCanvas`
+  now sizes its canvas from the loaded `<img>`'s own `naturalWidth`/
+  `naturalHeight` (see 10.5), not from `/images`' dims — so this field is
+  informational, not load-bearing, which is what makes leaving it nullable
+  an acceptable compromise rather than a functional regression.
+- **`labeled` is dropped from `ImageInfo` entirely**, not defaulted to
+  `false` or hardcoded from Checkpoint-1 knowledge. It recorded which images
+  had Checkpoint-1 ground-truth annotations, sourced from the old
+  `manifest.json`, which itself sourced it from a hardcoded `LABELED_IDS =
+  {1,2,3,4,5}` set in the original asset-prep script. None of that
+  information exists in the HF repo (only 8 `.ome.tiff` files, no metadata
+  about which were annotated). *Rejected alternative:* keep the field and
+  populate it from a hardcoded `{Image_1..Image_5}` set client- or
+  server-side, preserving the exact old response shape. Rejected because it
+  would silently reintroduce a Checkpoint-1-specific assumption into a
+  pipeline whose entire stated point is that the HF repo is the single
+  source of truth — the next image added to the repo would need a code
+  change just to display correctly in the picker, which is exactly the kind
+  of hidden coupling this refactor was meant to remove.
+
+This is flagged explicitly rather than silently done because "no response
+shape changes" was a clear, direct instruction, and this is the one place it
+wasn't fully honored — on purpose, and for a reason that should be checked
+against intent rather than assumed correct.
+
+### 10.3 The two caches, and why only one of them is this project's code
+
+- **`huggingface_hub`'s own cache** (`~/.cache/huggingface/hub`, or
+  `HF_HOME`) holds downloaded original `.ome.tiff` files.
+  `storage/hf_storage.py`'s `get_original_path()` calls `hf_hub_download`
+  with no custom `cache_dir` — deliberately not building a second cache on
+  top of a cache that already exists and already does this correctly.
+  *Rejected alternative:* the original (pre-refactor) backend's `HFStorage`
+  passed a custom `cache_dir` under `backend/.hf_cache/`. Removed in this
+  refactor specifically because `update_pipeline.md` calls this out by name
+  ("don't build a custom cache for originals, just call it correctly and
+  let it do its job").
+- **A new cache this project does own**: `HF_DISPLAY_CACHE_DIR`
+  (`backend/.cache/display/` by default) holds derived, downsampled display
+  PNGs plus a small `{image_id}.dims.json` sidecar recording that image's
+  `level0_dims`/`display_dims` — written once, the first time
+  `get_display_image_path()` is called for that image, read back cheaply
+  (no HF traffic) on every subsequent `/images` or `/images/{id}/display`
+  call. This sidecar file is what makes 10.2's resolution possible without
+  re-deriving dims from scratch (which would mean re-downloading the
+  original) every time `/images` is called.
+
+### 10.4 Fail fast and clearly on a missing/bad token, not a stack trace
+
+`backend/app/main.py` checks `settings.hf_token` / `settings.hf_dataset_repo`
+at import time (i.e., at process startup) and raises a plain, actionable
+`RuntimeError` if either is missing — verified by temporarily moving
+`backend/.env` out of the way and re-importing the app, which produced:
+
+```
+RuntimeError: HF_TOKEN and HF_DATASET_REPO must both be set -- the image
+dataset repo is private, so there is no local-data fallback. Set them in
+backend/.env (copy backend/.env.example) for local dev, or as secrets on
+your hosting platform for a deployment.
+```
+
+For an invalid (rather than missing) token, `storage/hf_storage.py` catches
+`huggingface_hub`'s `HfHubHTTPError` and re-raises it as this project's own
+`HFAuthError`, which `main.py`'s routes turn into a `401` with the same
+plain-English message — verified directly by setting `settings.hf_token` to
+a garbage string and calling `list_images()`, which raised:
+
+```
+HFAuthError: Could not list files in HF dataset repo
+'Dhruvgoyal18/saterra-project'. Check that HF_TOKEN is set and valid, and
+has read access to this repo.
+```
+
+*Rejected alternative:* let pydantic-settings' own `ValidationError` (from
+declaring `hf_token: str` with no default, forcing a required field) surface
+directly. Rejected in favor of a hand-written check with a custom message,
+because pydantic's default "Field required" error doesn't explain *why* the
+field is required (the private-repo reasoning) or *where* to put it
+(`backend/.env`) — both of which the acceptance criteria explicitly ask the
+error to communicate.
+
+### 10.5 Frontend fallout from 10.2, and why it's a net simplification
+
+Because `ImageInfo.display_dims` can now be `null`, `DetectionCanvas.tsx`
+no longer takes an `imageInfo` prop at all — it sizes its `<canvas>` from
+the loaded `<img>` element's own `naturalWidth`/`naturalHeight` inside the
+existing `onload` callback, which it needed to read anyway. This is a
+strict simplification, not a workaround: the canvas no longer depends on a
+value that might not exist yet, and one fewer prop has to be threaded
+through from `App.tsx`. The overlay's coordinate math is unaffected — it
+already used `/detect`'s `level0_dims`, computed fresh from the real array
+on every request, never from `/images`.
+
+The picker's `(labeled)` / `(unannotated test image)` suffix was removed
+from `App.tsx` to match `labeled` being dropped from the schema (10.2) —
+the picker now just lists whatever image ids the HF repo listing returns.
+
+### 10.6 What was deliberately NOT done, and why
+
+- **Did not delete or rename the local `DAPI_images/` folder**, even though
+  `update_pipeline.md`'s acceptance criterion 1 frames this as the way to
+  verify the new code path. `DAPI_images/` is real, non-regenerable
+  Checkpoint 1 data still used by Checkpoint 1's own scripts
+  (`data_validation.py`, `train.py`, etc.), which are entirely separate from
+  this web app. Deleting or renaming it would be a destructive, hard-to-undo
+  action on data outside the scope of what was asked, taken against a
+  folder this refactor has no legitimate reason to touch. Verified the same
+  property a non-destructive way instead: (1) grepped the entire
+  `PROJECT_INTERVIEW_WEB_APP/` tree for `DAPI_images`, `manifest.json`,
+  `bucket_staging`, and `STORAGE_BACKEND` and confirmed every remaining hit
+  is an explanatory comment about the retired design, not a live code path;
+  (2) ran the real backend against the real private HF repo end-to-end
+  (10.7) and confirmed every response came from HF/the new cache, not from
+  anything under `DAPI_images/`.
+- **Did not re-upload the originals under a new path/convention.** The
+  repo's existing flat layout (`Image_N.ome.tiff` at root) was adopted as
+  the convention `hf_storage.py` reads, rather than re-uploading ~1.4GB
+  under a different naming scheme this project had invented before seeing
+  the real repo. `scripts/upload_to_hf.py` was simplified to a one-file
+  re-upload tool (for a 9th image or a replacement) instead of being run to
+  push a parallel copy.
+- **Did not keep a "local mode" as a fallback switch.** `update_pipeline.md`
+  says this explicitly ("don't reintroduce a local read path anywhere,
+  including as a fallback"), and it was followed literally: there is no
+  `STORAGE_BACKEND` variable anymore, no `LocalStorage` class, no code path
+  that works without `HF_TOKEN`. This was a deliberate one-way door, not an
+  oversight — asked for directly, so implemented directly.
+
+### 10.7 Verification performed against the real private repo (this refactor)
+
+All of the following were actually run, against the real
+`Dhruvgoyal18/saterra-project` repo, using the token already cached on this
+machine written into `backend/.env`:
+
+| Check | Result |
+|---|---|
+| `GET /images` before any image requested | Returns all 8 real ids (`Image_1`…`Image_8`) from the live HF file listing, every `level0_dims`/`display_dims` `null`. Confirmed **zero** local `.cache/display/` directory existed afterward — listing truly doesn't force any download. |
+| `GET /images/Image_7/display`, first call (cache miss) | 200, real PNG (2,441,382 bytes), **45.1s** (real network download of the ~170MB original + PNG generation). `.cache/display/Image_7.png` + `Image_7.dims.json` created, sidecar recording `level0_dims: [9279, 9238]`, `display_dims: [2000, 1991]` — matching Checkpoint 1's known dimensions for this image exactly. |
+| `GET /images` again | `Image_7` now reports its real dims; all other images still `null` — confirms dims populate lazily, one image at a time, exactly as required. |
+| `GET /images/Image_7/display`, second call (cache hit) | 200, **0.095s**, PNG file's mtime unchanged — confirms no re-download, no regeneration. |
+| `POST /detect {"image_id": "Image_7"}` | 200, summary **byte-for-byte identical** to Checkpoint 1's saved result and to this project's own earlier local-mode test: `total_artifact_area_px: 25714688`, `num_connected_regions: 708`, `largest_region_area_px: 12132352`. Confirms the HF-sourced pipeline produces identical results to local-file access, as it must (same bytes, just a different path to them). |
+| Missing `HF_TOKEN`/`HF_DATASET_REPO` (`.env` temporarily moved aside) | App import raises the clear `RuntimeError` quoted in 10.4, not a traceback. |
+| Invalid `HF_TOKEN` | `list_images()` raises the clear `HFAuthError` quoted in 10.4, which `main.py` turns into an HTTP 401. |
+| `frontend`: `npx tsc -b` after the `ImageInfo`/`DetectionCanvas` changes | Passes clean, no errors. |
+
+**One timing anomaly worth recording honestly:** a second `/detect` call for
+the already-cached `Image_7` took ~44s, not meaningfully faster than the
+first (~35s for `detect_artifacts` alone, isolated separately). Root-caused
+by timing each stage individually: `get_original_path` (cache hit) took only
+~0.5–2s (huggingface_hub still does a `HEAD` request to validate the cached
+file's ETag even on a hit — expected, correct behavior, not a bug), while
+`detect_artifacts` itself varied between ~8s and ~31s for the *identical*
+computation across different points in this session. This machine has other
+unrelated processes competing for CPU (observed independently during
+Checkpoint 1 too), so this is attributed to shared-machine CPU contention in
+this sandboxed environment, not a defect introduced by this refactor — the
+computed result was identical every time regardless of how long it took.
+
+### 10.8 Files touched in this refactor
+
+| File | Change |
+|---|---|
+| `backend/app/storage/__init__.py`, `backend/app/storage/hf_storage.py` | **New.** Replaces `backend/app/storage.py` (deleted) — single module for all HF I/O: `list_images`, `get_original_path`, `get_display_image_path`, `get_cached_dims`, `HFAuthError`, `ImageNotFoundError` |
+| `backend/app/ml/display_prep.py` | **New.** Percentile-normalize + downsample logic, extracted out of the old `scripts/prepare_display_images.py` so both `hf_storage.py` and the now-optional debug script share one implementation |
+| `backend/app/config.py` | Removed `storage_backend`, `local_bucket_dir`, `local_originals_dir`. Added required (nullable-with-startup-check) `hf_token`, `hf_dataset_repo`, plus `hf_display_cache_dir` |
+| `backend/app/schemas.py` | `ImageInfo`: dropped `labeled`, made `level0_dims`/`display_dims` optional (see 10.2) |
+| `backend/app/main.py` | Startup `RuntimeError` if HF creds missing; all three routes rewired through `storage.*`; `HFAuthError` → 401, `ImageNotFoundError` → 404 |
+| `backend/Dockerfile` | Removed `ENV STORAGE_BACKEND=hf` (concept no longer exists); comment updated to explain the two caches |
+| `scripts/prepare_display_images.py` | Retired as a required step; repurposed as an optional local debug CLI (`prepare_display_images.py some.tiff [out.png]`) sharing `display_prep.py` |
+| `scripts/upload_to_hf.py` | Simplified to a single-file re-upload tool for a new/replacement original; no longer uploads `manifest.json` or `display.png` |
+| `frontend/src/types.ts` | `ImageInfo`: dropped `labeled`, `level0_dims`/`display_dims` now `| null` |
+| `frontend/src/DetectionCanvas.tsx` | Dropped `imageInfo` prop; canvas now sized from the loaded image's `naturalWidth`/`naturalHeight` |
+| `frontend/src/App.tsx` | Removed the `(labeled)`/`(unannotated test image)` picker suffix |
+| `backend/.env.example`, `backend/README.md`, top-level `README.md`, root `.gitignore` | Updated for the HF-only flow; `bucket_staging/`/`.hf_cache/` gitignore entries replaced with `backend/.cache/` |
+| `backend/bucket_staging/`, `backend/.hf_cache/` | **Deleted** (retired local-mode artifacts) |
+
+---
+
+## 9. Repo structure (current, post-refactor)
 
 ```
 PROJECT_INTERVIEW_WEB_APP/
   backend/
     app/
-      main.py              # FastAPI app, CORS, /health /images /images/{id}/display /detect
-      config.py            # Settings (local vs hf storage, model paths, CORS)
-      storage.py           # Storage ABC + LocalStorage + HFStorage
-      schemas.py           # Pydantic request/response models
+      main.py                 # FastAPI app, CORS, startup HF-credential check, /health /images /images/{id}/display /detect
+      config.py                # Settings: HF_TOKEN/HF_DATASET_REPO (required), HF_DISPLAY_CACHE_DIR, model paths, CORS
+      schemas.py                # Pydantic request/response models
+      storage/
+        hf_storage.py            # The ONLY module that talks to huggingface_hub: list_images, get_original_path,
+                                  # get_display_image_path (get-or-create display cache), get_cached_dims
       ml/
-        model.py           # SmallCNN (vendored from Checkpoint 1)
-        preprocessing.py   # percentile normalization (vendored)
-        tissue.py          # estimate_tissue_mask (vendored)
-        inference.py       # detect_artifacts (vendored)
-        weights/           # model_final.pt + preprocessing_config.json (copied from Checkpoint 1 artifacts/)
+        model.py                 # SmallCNN (vendored from Checkpoint 1)
+        preprocessing.py          # percentile normalization for model input (vendored)
+        display_prep.py            # percentile normalization + downsample for display PNGs (shared with scripts/)
+        tissue.py                   # estimate_tissue_mask (vendored)
+        inference.py                 # detect_artifacts (vendored)
+        weights/                      # model_final.pt + preprocessing_config.json (copied from Checkpoint 1 artifacts/)
     requirements.txt
-    Dockerfile             # HF Spaces (Docker SDK), port 7860
-    README.md              # Space card + secrets table
+    Dockerfile                  # HF Spaces (Docker SDK), port 7860 -- no storage-mode env var anymore
+    README.md                    # Space card + required secrets table
     .env.example
-    bucket_staging/        # generated locally by scripts/prepare_display_images.py (gitignored)
+    .cache/display/                # generated on demand, one {image_id}.png + {image_id}.dims.json per requested image (gitignored)
 
   frontend/
     src/
-      api.ts               # fetch wrappers, cold-start timeout handling
-      types.ts              # shared TS types matching backend schemas
-      colormap.ts            # diverging blue/white/red confidence colormap
-      DetectionCanvas.tsx      # single-canvas image + overlay renderer
-      SummaryPanel.tsx           # artifact area / regions / largest region stats card
-      App.tsx                     # picker, Detect button, toggles, wiring
+      api.ts                    # fetch wrappers, cold-start timeout handling
+      types.ts                   # shared TS types (ImageInfo dims now nullable, no `labeled` field)
+      colormap.ts                  # diverging blue/white/red confidence colormap
+      DetectionCanvas.tsx            # single-canvas image + overlay renderer, self-sizes from the loaded image
+      SummaryPanel.tsx                 # artifact area / regions / largest region stats card
+      App.tsx                           # picker, Detect button, toggles, wiring
     .env.example
 
   scripts/
-    prepare_display_images.py   # Phase A: display PNGs + manifest.json
-    upload_to_hf.py              # Phase A production: upload to private HF dataset repo
+    prepare_display_images.py    # OPTIONAL local debug tool only -- not part of the runtime path
+    upload_to_hf.py                # add/replace a single original image in the HF repo -- not part of required deploy
 
-  README.md                      # setup + deploy instructions
+  README.md                        # setup + deploy instructions (HF-only flow)
 ```
+

@@ -150,3 +150,47 @@ header h1 {
     grid-template-columns: 1fr;
   }
 }
+
+.login-page {
+  max-width: 380px;
+}
+
+.login-form {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+
+.login-form input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #111;
+  color: #e5e5e5;
+}
+
+.user-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85rem;
+  color: #9a9a9a;
+  margin-bottom: 8px;
+}
+
+.user-bar button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: transparent;
+  color: #e5e5e5;
+  cursor: pointer;
+}

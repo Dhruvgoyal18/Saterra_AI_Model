@@ -31,8 +31,7 @@ Thumbs.db
 # Checkpoint 2 web app -- generated/local-only, regenerable or secret
 PROJECT_INTERVIEW_WEB_APP/frontend/node_modules/
 PROJECT_INTERVIEW_WEB_APP/frontend/dist/
-PROJECT_INTERVIEW_WEB_APP/backend/bucket_staging/
-PROJECT_INTERVIEW_WEB_APP/backend/.hf_cache/
+PROJECT_INTERVIEW_WEB_APP/backend/.cache/
 PROJECT_INTERVIEW_WEB_APP/backend/.env
 PROJECT_INTERVIEW_WEB_APP/frontend/.env
 PROJECT_INTERVIEW_WEB_APP/*.log

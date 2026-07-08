@@ -1,10 +1,14 @@
 import { useEffect, useRef } from "react";
-import type { DetectResponse, ImageInfo } from "./types";
+import type { DetectResponse } from "./types";
 import { confidenceToRgba, isUncertain } from "./colormap";
 
 interface Props {
-  displayImageUrl: string;
-  imageInfo: ImageInfo | null;
+  // An object URL (from URL.createObjectURL), not a plain API URL -- the
+  // display endpoint is auth-gated and a native Image() load can't carry an
+  // Authorization header, so the caller fetches it with the header attached
+  // and hands this component the resulting blob's object URL instead (see
+  // api.ts's fetchDisplayImageObjectUrl and App.tsx).
+  imageObjectUrl: string | null;
   detection: DetectResponse | null;
   showOverlay: boolean;
   showUncertainty: boolean;
@@ -18,9 +22,16 @@ interface Props {
 // (width: 100%, height: auto) scales both together and they can never drift
 // apart the way two separately-positioned/resized layers (an <img> plus an
 // absolutely-positioned <canvas> on top) could.
+//
+// Canvas dimensions come from the loaded image's own naturalWidth/
+// naturalHeight, not from a pre-known display_dims value passed in from
+// /images -- that field is null until the backend has generated this
+// image's display PNG at least once (it's a get-or-create cache now, not a
+// pre-built manifest), so the canvas can't depend on it being populated in
+// advance. The overlay's scale factor still uses /detect's level0_dims,
+// which is always computed fresh from the actual array at request time.
 export default function DetectionCanvas({
-  displayImageUrl,
-  imageInfo,
+  imageObjectUrl,
   detection,
   showOverlay,
   showUncertainty,
@@ -30,18 +41,18 @@ export default function DetectionCanvas({
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !imageInfo) return;
-
-    const [displayW, displayH] = imageInfo.display_dims;
-    canvas.width = displayW;
-    canvas.height = displayH;
+    if (!canvas || !imageObjectUrl) return;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const img = new Image();
-    img.crossOrigin = "anonymous";
     img.onload = () => {
+      const displayW = img.naturalWidth;
+      const displayH = img.naturalHeight;
+      canvas.width = displayW;
+      canvas.height = displayH;
+
       ctx.clearRect(0, 0, displayW, displayH);
       ctx.drawImage(img, 0, 0, displayW, displayH);
 
@@ -49,8 +60,8 @@ export default function DetectionCanvas({
         drawOverlay(ctx, detection, displayW, displayH, showUncertainty, overlayAlpha);
       }
     };
-    img.src = displayImageUrl;
-  }, [displayImageUrl, imageInfo, detection, showOverlay, showUncertainty, overlayAlpha]);
+    img.src = imageObjectUrl;
+  }, [imageObjectUrl, detection, showOverlay, showUncertainty, overlayAlpha]);
 
   return (
     <canvas
@@ -73,8 +84,8 @@ function drawOverlay(
   const tileSize = detection.tile_size;
 
   // Exact mapping: the display PNG is a pure downsample of level 0 (see
-  // scripts/prepare_display_images.py), so a single scale factor per axis
-  // maps a level-0 tile rectangle straight onto display pixels -- no
+  // backend/app/ml/display_prep.py), so a single scale factor per axis maps
+  // a level-0 tile rectangle straight onto display pixels -- no
   // approximation, no drift.
   const scaleX = displayW / level0W;
   const scaleY = displayH / level0H;

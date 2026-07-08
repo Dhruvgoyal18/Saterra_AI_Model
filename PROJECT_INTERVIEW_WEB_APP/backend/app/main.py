@@ -1,30 +1,53 @@
 """FastAPI service wrapping detect_artifacts.
 
-Two things this does that the plan's "public-read bucket" version doesn't
-need to: the storage is a *private* HF dataset repo (per requirement), so
+The Hugging Face dataset repo is the single source of truth for image data,
+in every environment including local dev -- see storage/hf_storage.py and
+steps_of_implementation_checkpoint2.md for why. Since that repo is private,
 this service also proxies the display PNG through itself
 (GET /images/{id}/display) rather than the browser fetching it directly from
 the bucket -- otherwise a private bucket would be unreachable from the
-browser at all. The bucket credentials (HF_TOKEN) never leave this server.
+browser at all. HF_TOKEN never leaves this server.
 """
 
 import json
 import logging
 
-from fastapi import FastAPI, HTTPException
+import httpx
+import tifffile
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 
+from . import storage
 from .config import settings
 from .ml.inference import detect_artifacts
 from .ml.tissue import estimate_tissue_mask
 from .schemas import DetectRequest, DetectResponse, ImageInfo, ImagesResponse
-from .storage import ImageNotFoundError, get_storage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("artifact-detector")
 
-app = FastAPI(title="DAPI Artifact Detector", version="1.0.0")
+# Fail fast and clearly at startup if the repo is private and no credential
+# was given, rather than letting a confusing httpx/huggingface_hub traceback
+# surface from deep inside the first request (acceptance criterion: an
+# auth-config problem must read as "you forgot to set this," not a bug).
+if not settings.hf_token or not settings.hf_dataset_repo:
+    raise RuntimeError(
+        "HF_TOKEN and HF_DATASET_REPO must both be set -- the image dataset repo is "
+        "private, so there is no local-data fallback. Set them in backend/.env "
+        "(copy backend/.env.example) for local dev, or as secrets on your hosting "
+        "platform for a deployment."
+    )
+
+if not settings.supabase_url or not settings.supabase_anon_key:
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_ANON_KEY must both be set -- every image/detect "
+        "endpoint is gated behind a Supabase-issued session token (see require_user "
+        "below). Set them in backend/.env for local dev, or as secrets/variables on "
+        "your hosting platform for a deployment."
+    )
+
+app = FastAPI(title="DAPI Artifact Detector", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,48 +62,76 @@ TILE_SIZE = _preprocessing_config["tile_size"]
 BACKGROUND_THRESHOLD = _preprocessing_config["background_threshold"]
 
 
+_http_client = httpx.AsyncClient()
+
+
+async def require_user(authorization: str | None = Header(None)) -> dict:
+    """Verify the Supabase-issued session token on every gated request.
+
+    This is the actual access boundary, not the frontend's login screen --
+    anyone can call this API directly with curl/Postman, bypassing the
+    frontend entirely, so the frontend's own auth check is UX only and this
+    dependency is what actually enforces invite-only access.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.removeprefix("Bearer ")
+    resp = await _http_client.get(
+        f"{settings.supabase_url}/auth/v1/user",
+        headers={"Authorization": f"Bearer {token}", "apikey": settings.supabase_anon_key},
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return resp.json()
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "storage_backend": settings.storage_backend}
+    return {"status": "ok", "hf_dataset_repo": settings.hf_dataset_repo}
 
 
-@app.get("/images", response_model=ImagesResponse)
+@app.get("/images", response_model=ImagesResponse, dependencies=[Depends(require_user)])
 def list_images() -> ImagesResponse:
-    storage = get_storage()
     try:
-        manifest = storage.get_manifest()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        image_ids = storage.list_images()
+    except storage.HFAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-    images = [
-        ImageInfo(
-            image_id=image_id,
-            labeled=info["labeled"],
-            level0_dims=tuple(info["level0_dims"]),
-            display_dims=tuple(info["display_dims"]),
+    images = []
+    for image_id in image_ids:
+        dims = storage.get_cached_dims(image_id)  # None until first display fetch -- doesn't force one
+        images.append(
+            ImageInfo(
+                image_id=image_id,
+                level0_dims=tuple(dims["level0_dims"]) if dims else None,
+                display_dims=tuple(dims["display_dims"]) if dims else None,
+            )
         )
-        for image_id, info in sorted(manifest["images"].items())
-    ]
     return ImagesResponse(images=images)
 
 
-@app.get("/images/{image_id}/display")
-def get_display_image(image_id: str) -> Response:
-    storage = get_storage()
+@app.get("/images/{image_id}/display", dependencies=[Depends(require_user)])
+def get_display_image(image_id: str) -> FileResponse:
     try:
-        png_bytes = storage.get_display_png_bytes(image_id)
-    except ImageNotFoundError as exc:
+        png_path = storage.get_display_image_path(image_id)
+    except storage.HFAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except storage.ImageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return Response(content=png_bytes, media_type="image/png")
+    return FileResponse(png_path, media_type="image/png")
 
 
-@app.post("/detect", response_model=DetectResponse)
+@app.post("/detect", response_model=DetectResponse, dependencies=[Depends(require_user)])
 def detect(request: DetectRequest) -> DetectResponse:
-    storage = get_storage()
     try:
-        image = storage.get_original_array(request.image_id)
-    except ImageNotFoundError as exc:
+        original_path = storage.get_original_path(request.image_id)
+    except storage.HFAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except storage.ImageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    with tifffile.TiffFile(original_path) as tif:
+        image = tif.series[0].levels[0].asarray()
 
     logger.info("Running detect_artifacts on %s (shape=%s)", request.image_id, image.shape)
     tissue_mask = estimate_tissue_mask(image)

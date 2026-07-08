@@ -1,6 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn[standard]
+httpx
 huggingface_hub
 pydantic-settings
 python-multipart
@@ -9,3 +10,4 @@ scipy
 tifffile
 imagecodecs
 torch
+Pillow
