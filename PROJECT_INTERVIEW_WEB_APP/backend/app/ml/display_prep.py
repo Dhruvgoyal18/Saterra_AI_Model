@@ -8,6 +8,7 @@ local debug script both call the exact same code -- there is only one
 definition of "how a display PNG is made," not two copies that could drift.
 """
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -23,15 +24,27 @@ def to_display_png(image: np.ndarray) -> tuple[Image.Image, tuple[int, int]]:
 
     Returns (PIL image, (width, height)) of the downsampled result.
     """
+    # Percentiles computed on the full-resolution array -- must happen
+    # before any downsampling so the contrast stretch is calibrated
+    # identically to before, not an approximation from a downsampled preview.
     lo, hi = np.percentile(image, LOW_PCTILE), np.percentile(image, HIGH_PCTILE)
     if hi <= lo:
         hi = lo + 1.0
-    clipped = np.clip(image, lo, hi)
-    scaled = ((clipped - lo) / (hi - lo) * 255).astype(np.uint8)
 
     height, width = image.shape
     scale = TARGET_LONG_SIDE / max(height, width)
     new_w, new_h = max(1, round(width * scale)), max(1, round(height * scale))
 
-    pil_img = Image.fromarray(scaled, mode="L").resize((new_w, new_h), Image.LANCZOS)
+    # Downsample the raw uint16 array BEFORE clip/rescale. Clipping against
+    # float percentile bounds upcasts uint16 -> float64; doing that at full
+    # resolution (~9000x9000) allocated a ~637MB intermediate array, which
+    # was blowing past low-memory hosts. cv2 (not PIL) for the resize --
+    # cv2.resize handles uint16 input correctly, whereas PIL's 16-bit mode
+    # support is less consistent across versions.
+    small = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    clipped = np.clip(small, lo, hi)
+    scaled = ((clipped - lo) / (hi - lo) * 255).astype(np.uint8)
+
+    pil_img = Image.fromarray(scaled, mode="L")
     return pil_img, (new_w, new_h)

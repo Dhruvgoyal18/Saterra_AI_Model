@@ -11,3 +11,4 @@ tifffile
 imagecodecs
 torch
 Pillow
+opencv-python-headless
