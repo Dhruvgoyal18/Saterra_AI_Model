@@ -828,3 +828,279 @@ PROJECT_INTERVIEW_WEB_APP/
   README.md                        # setup + deploy instructions (HF-only flow)
 ```
 
+---
+
+## 11. Invite-only access: Supabase Auth
+
+Triggered by the deployed backend needing to stay reachable by a real browser
+(a private HF Space blocks unauthenticated requests at HF's own gateway --
+see §12) while still not being open to literally anyone with the URL. The
+user explicitly wanted "invite-only," not "public demo."
+
+**Decision: Supabase Auth, not a hand-rolled credentials table.** Supabase
+ships a full managed auth service (its own user store, JWT issuance, password
+hashing) for free. Rolling a custom `users` table would mean owning real
+security surface (password storage) for no benefit. "Invite-only" is just one
+Supabase project setting: **Authentication → Sign In / Providers → disable
+"Allow new users to sign up."** Verified this setting is the actual boundary,
+not just a frontend nicety, by hitting Supabase's public `/auth/v1/settings`
+endpoint directly (`disable_signup`) and by attempting a raw `POST
+/auth/v1/signup` against the real project both before and after flipping it —
+before: request proceeded (only stopped by an unrelated email-rate-limit);
+after: `422 signup_disabled`. New users are added one at a time via
+**Authentication → Users → Add user**.
+
+**The frontend's login check is UX only -- the real gate is server-side.**
+`backend/app/main.py` gained a `require_user` dependency: reads the
+`Authorization: Bearer <token>` header, calls Supabase's own `GET
+/auth/v1/user` (with `apikey: SUPABASE_ANON_KEY`) to validate it, and raises
+401 if missing/invalid. Applied via `dependencies=[Depends(require_user)]` to
+`/images`, `/images/{image_id}/display`, and `/detect` -- deliberately *not*
+`/health` (no reason to gate a liveness check). Verified directly: curl
+against all three gated endpoints with no token returns `{"detail":"Missing
+bearer token"}` / 401; with a real token obtained via Supabase's own
+`/auth/v1/token?grant_type=password` endpoint, all three return 200 with
+correct data. This is the actual access boundary -- anyone could call the API
+directly with curl, bypassing the frontend UI entirely, so gating only in
+the frontend would have been no gate at all.
+
+**A gap caught before implementing, not after:** `DetectionCanvas.tsx` loads
+the display image via a plain `new Image(); img.src = url` (with
+`crossOrigin="anonymous"`) -- a native browser image load, which cannot carry
+a custom `Authorization` header. Gating `/images/{id}/display` the same way
+as the other two endpoints would have silently broken image display, since
+the browser has no way to attach the JWT to that request. Fix:
+`api.ts`'s `fetchDisplayImageObjectUrl` fetches the endpoint with the header
+attached, converts the response to a `Blob`, and hands `DetectionCanvas` an
+object URL (`URL.createObjectURL`) instead of a plain API URL --
+`App.tsx` owns that object URL's lifecycle (revokes the previous one on
+image-switch or unmount, since object URLs otherwise leak for the page's
+life).
+
+**Token refresh, handled by never caching the token.** Supabase access tokens
+expire (1hr default). `api.ts`'s `authHeaders()` calls
+`supabase.auth.getSession()` fresh immediately before every API call rather
+than capturing `session.access_token` once at login -- the Supabase client
+auto-refreshes the underlying session, so reading it fresh each time means a
+long-lived tab keeps working without the user noticing anything.
+
+**Frontend pieces added:** `src/supabaseClient.ts` (the client, using the
+anon key -- safe to expose client-side per Supabase's own design, unlike the
+backend's `HF_TOKEN`), `src/LoginForm.tsx` (email/password form via
+`signInWithPassword`), and `App.tsx` restructured into an outer `App`
+(session check + `onAuthStateChange` subscription, renders `LoginForm` or the
+real UI) wrapping the original UI (moved into `DetectorApp`, now with a
+sign-out button and the visiting user's email shown).
+
+**Verified end-to-end, with a real invited user** (after working around two
+false starts: an invite-email password never actually got set, and a second
+guessed password was also wrong -- resolved by using Supabase's **Create new
+user** path, which sets a password directly with no email step): every gated
+endpoint tested with curl + a real JWT obtained from Supabase's own token
+endpoint, matching exactly the pre-auth numbers for the same images (e.g.
+Image_6: 28.31% artifact frac, 1399 regions, 6,250,496px largest region --
+byte-for-byte the same as before auth was added, confirming the auth layer
+changes access control only, not the model's answer).
+
+---
+
+## 12. Deployment: Hugging Face Space, Render (attempted), Vercel
+
+### 12.1 Backend -> Hugging Face Space (`Dhruvgoyal18/saterra-ml-model`)
+
+Pushed `backend/` (Dockerfile, `app/`, weights, requirements -- excluding
+`.env`, logs, `.cache/`, and a stray local venv folder that had ended up
+inside `backend/`) via `hf upload`. Set `HF_TOKEN`/`HF_DATASET_REPO` as Space
+secrets and `SUPABASE_URL`/`SUPABASE_ANON_KEY` as Space variables (the anon
+key isn't actually sensitive, so a "variable" rather than a "secret" is the
+more accurate classification, even though it doesn't matter functionally).
+
+**Visibility: flipped from private to public, deliberately, after Supabase
+Auth existed as the real gate.** A private Space blocks *any* unauthenticated
+request at HF's own gateway, before the FastAPI app even sees it -- verified
+directly (unauthenticated curl to a private Space returns HF's branded HTML
+404, not this app's JSON). A browser has no safe way to hold an HF credential
+client-side (embedding one in the shipped frontend bundle is trivially
+extractable via DevTools -- discussed and rejected as "security theater," not
+real access control). Once Supabase Auth was the actual boundary, keeping the
+Space private too would have been redundant *and* would have broken the
+frontend for real signed-in users, for no added security. This is why §10's
+earlier design (private Space, browser never touches `HF_TOKEN`) evolved:
+the Space's own visibility is no longer a meaningful security boundary in
+this architecture -- Supabase is.
+
+**A real free-tier capacity issue, not a bug, hit along the way.** After the
+redeploy, the Space sat in `RUNTIME_ERROR` / `APP_STARTING` for an extended
+period with `hardware.current: null` and an explicit `"Scheduling failure:
+not enough hardware capacity"` message -- confirmed via HF's own status page
+showing Spaces as fully operational (so not a platform-wide incident), and
+via the build logs showing a clean, error-free build both times. Resolved on
+its own once free-tier `cpu-basic` capacity freed up; a fresh commit (forcing
+a new scheduling attempt) got it from outright failure to "queued," and it
+came up fully on its own after that. `hf spaces restart` and
+`HfApi().restart_space()` both 401'd (a scope gap in the token's OAuth
+permissions, unrelated to the capacity issue, not worth fixing for one
+restart call).
+
+**One `hf` CLI quirk hit on a later redeploy:** `hf upload` to this
+already-existing Space started failing with `402 Payment Required ... hosting
+Docker Spaces on free cpu-basic requires a PRO subscription` -- despite the
+Space already existing and running fine as free. Root cause not fully
+diagnosed, but `HfApi().upload_folder(...)` (the underlying Python API,
+bypassing whatever pre-check the `hf` CLI's `upload` command does) succeeded
+immediately on the same content -- worth using `upload_folder` directly if
+`hf upload` ever throws this again against an existing repo.
+
+### 12.2 Backend -> Render (attempted as a fallback, kept as a live secondary)
+
+Deployed the same `backend/` from the project's GitHub remote
+(`Dhruvgoyal18/Saterra_AI_Model`) to Render as a free-tier fallback while the
+HF Space was capacity-constrained. Render's free `cpu-basic`-equivalent tier
+has meaningfully less RAM than HF's (~512MB vs. HF's much larger free
+allocation) -- `/health` and `/images` (lightweight) worked fine, but
+`/images/{id}/display` and `/detect` (which decode a full ~9000x9000 TIFF)
+reliably crashed the process with a silent restart (`Started server process
+[N]` with no Python traceback at all -- the signature of an OS-level OOM
+kill, not an application exception).
+
+**Root-caused, not just worked around:** `display_prep.py`'s original
+implementation computed the percentile clip/rescale (`np.clip(image, lo,
+hi)`) against the **full-resolution** array. `np.clip` against float
+percentile bounds upcasts `uint16` -> `float64`, so this one line allocated a
+~637MB intermediate for a ~9000x9000 image -- before the original array,
+before PyTorch's own baseline footprint, before anything else. Verified via
+two independent measurements on the real `Image_7` original: `tracemalloc`
+(Python-level allocations: 2058MB -> 171MB after the fix) and an isolated
+clean-process OS-level peak working set (`psutil`, since Python's `resource`
+module isn't available on Windows: 2268MB -> 431MB after the fix).
+
+**Fix:** reorder so the downsample happens *before* the clip/rescale, not
+after -- percentiles are still computed on the full-resolution array (so the
+contrast stretch is calibrated identically), but the expensive
+`clip`/upcast-to-float64 step now only ever touches the small, already-2000px
+array. Downsampling uses `cv2.resize(..., interpolation=cv2.INTER_AREA)`
+instead of PIL, since `cv2.resize` handles `uint16` input reliably, whereas
+PIL's 16-bit mode support is inconsistent across versions.
+`opencv-python-headless` (not `opencv-python`) was added to
+`requirements.txt` specifically to avoid pulling in `libGL`/X11 dependencies
+that aren't present on the `python:3.11-slim` Docker base and would have
+broken the build.
+
+**Visual/numeric verification of the fix, done before trusting it:** the
+old and new implementations were run side-by-side against the real
+`Image_7` TIFF. Visually indistinguishable. A real pixel-level diff exists
+(mean diff 1.56/255, but max diff 105, ~16.6% of pixels differing by >2
+levels) -- root-caused, not hand-waved away: DAPI images have "a long tail of
+very bright individual nuclei" (per Checkpoint 1's own findings), and
+`clip` is non-linear, so clip-then-downsample and downsample-then-clip are
+mathematically different specifically for outlier pixels near/above the
+percentile threshold. This is an inherent, expected consequence of the
+reordering required to get the memory benefit, not a bug -- confirmed
+visually imperceptible in the side-by-side.
+
+**Outcome:** even after the fix, Render's free tier still isn't reliably
+enough headroom once the app's own baseline (torch + fastapi + uvicorn +
+huggingface_hub, already resident before any request) is added on top of the
+now-much-smaller-but-still-real cost of decoding a full-resolution TIFF (this
+file has no lower-resolution pyramid level to shortcut through -- confirmed
+via `tifffile`, `len(series.levels) == 1`). Decision (user's call, given HF
+already proven to handle this workload comfortably): keep Render as a
+secondary/backup deploy target, but treat the HF Space as the primary. The
+memory fix was pushed to both, and is a genuine improvement regardless of
+which host serves traffic.
+
+### 12.3 Frontend -> Vercel
+
+Deployed via `vercel link` + `vercel env add` (`VITE_API_BASE_URL`,
+`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` -- all client-visible by
+design, Vercel's own CLI warns about this for `VITE_`-prefixed vars, which is
+expected and fine per the anon-key-is-safe reasoning in §11) + `vercel deploy
+--prod`. Live at `https://frontend-opal-iota-55.vercel.app`. Confirmed the
+built bundle actually embeds the HF Space URL (not the Render fallback) by
+grepping the shipped JS for both hostnames.
+
+### 12.4 Final end-to-end state (all verified, not assumed)
+
+| Piece | State |
+|---|---|
+| HF Space (primary) | Public, running the memory-fixed code, Supabase-gated. `/health`, `/images`, `/images/{id}/display`, `/detect` all verified with a real invited-user JWT; `/detect` numbers match Checkpoint 1's saved results exactly. |
+| Render (secondary) | Public, same code, same env vars. Lightweight endpoints work; heavy endpoints (`/display`, `/detect`) may still OOM on the free tier depending on load -- not the primary target. |
+| Vercel frontend | Live, pointed at the HF Space, Supabase login gate wired end-to-end. |
+| GitHub | `Dhruvgoyal18/Saterra_AI_Model`, branch `model_dep_v2` -- source for the Render deploy; the user's own repo, commits made by the user, not this session. |
+
+---
+
+## 13. Code review findings (post-deployment, whole-codebase pass)
+
+Requested explicitly after the deployment work above, covering `backend/`,
+`frontend/`, and re-confirming `src/` (Checkpoint 1) is still byte-for-byte
+what the vendored `backend/app/ml/` copies claim to match. Not all of these
+are worth fixing immediately -- ranked by severity, with the ones already
+discussed and deliberately accepted as-is marked so.
+
+**Correctness:**
+1. **Confidence-grid sentinel collision.** `DetectionCanvas.tsx` treats a
+   tile's confidence of exactly `0.0` as "not evaluated" (background). The
+   backend's `detect_artifacts` uses the same `0.0` for both "never touched"
+   tiles *and* -- in principle -- a genuinely-evaluated tile whose sigmoid
+   output underflows to exactly `0.0` in float32. Low probability (would need
+   a very negative logit), but such a tile would render as blank/unevaluated
+   instead of confident-clean blue. A real fix needs a separate per-tile
+   "evaluated" flag in the API response.
+2. **Display cache has no invalidation on replace.** `scripts/upload_to_hf.py`
+   explicitly supports replacing an existing original, but
+   `hf_storage.py`'s `get_display_image_path` only checks whether the cached
+   PNG file exists locally -- never compares against the source's revision/
+   ETag. Replacing an image would leave the display cache stale indefinitely
+   while `/detect` (via `huggingface_hub`'s own ETag-aware cache) picks up
+   the new original immediately -- a silent mismatch between what's shown
+   and what's analyzed.
+3. **Unhandled exceptions on corrupted downloads.** Only `HFAuthError`/
+   `ImageNotFoundError` get friendly 401/404 responses in `main.py`. A
+   truncated download or corrupted TIFF would raise inside
+   `tifffile.TiffFile(...)` uncaught, surfacing as a raw 500.
+4. **No `image_id` allowlist check** before it's used to construct HF
+   filenames in `/images/{image_id}/display` and `POST /detect`. Low
+   practical risk (remote HTTP API, small closed file set), but a real
+   defense-in-depth gap -- should validate against `list_images()` first.
+
+**Security/operational (mostly already discussed and knowingly accepted this
+session, formalized here for the record):**
+5. `HF_TOKEN` on both deployments is far more broadly scoped (write-repos,
+   manage-repos, read-billing, webhooks, jobs, ...) than the read-only
+   dataset access it's actually used for. **Accepted risk**, user's call.
+6. The one real invited test account's password (`1234`) is trivially weak.
+   **Accepted risk**, user's call.
+7. Supabase's password-strength minimum isn't actually enforced (warned, but
+   still allowed `1234`) -- worth tightening (Authentication → Settings) if
+   more users get invited.
+8. `CORS_ORIGINS=*` on both deployed backends -- not exploitable given the
+   Bearer-header (not cookie) architecture, but should be tightened to the
+   real Vercel origin now that it's known.
+9. No rate limiting on `/detect` -- a signed-in user could repeatedly trigger
+   the CPU-only inference path.
+10. `require_user` round-trips to Supabase's `/auth/v1/user` on *every*
+    gated request -- adds latency and makes the app hard-dependent on
+    Supabase's uptime for anything to work at all. Verifying the JWT locally
+    (`pyjwt` + the project's JWT secret, no network call) would remove both
+    costs; noted as a future upgrade when this was first designed (§11), not
+    yet done.
+
+**Housekeeping:**
+11. **`torchvision` is dead weight** in the root `requirements.txt` --
+    confirmed via a full-tree grep, it's never imported anywhere in `src/` or
+    `test/`.
+12. **Vendored code duplication** (`src/` ↔ `backend/app/ml/`) remains a
+    deliberate, documented tradeoff (§4's "vendor, don't import across
+    trees" decision) but is a real "remember to fix both copies" liability
+    going forward. Re-confirmed in this review: `model.py`,
+    `dataset.py`/`preprocessing.py`, `masks.py`'s `estimate_tissue_mask`/
+    `tissue.py`, and `inference.py` are all still byte-for-byte identical
+    between the two trees.
+
+**Minor frontend UX gaps:**
+13. No visible loading indicator during the initial Supabase session check
+    (`App`'s `if (!authChecked) return null` -- blank page for a moment).
+14. No React error boundary -- an unexpected exception anywhere crashes to a
+    blank page with no recovery UI.
+
