@@ -67,11 +67,34 @@ def list_images() -> list[str]:
     return sorted(f[: -len(_ORIGINAL_SUFFIX)] for f in files if f.endswith(_ORIGINAL_SUFFIX))
 
 
+def validate_image_id(image_id: str) -> None:
+    """Raise ImageNotFoundError if image_id isn't one of the real images in
+    the HF repo -- call this before using image_id to construct any HF
+    filename/path.
+
+    This was a low-priority gap when only a <select> dropdown could supply
+    image_id, but stops being low-priority once an LLM can freely generate
+    this argument from natural language (Checkpoint 3's /chat) and might
+    invent an ID that doesn't exist. Also fixes a real pre-existing bug in
+    get_original_path below: a 404 for "this filename doesn't exist in an
+    otherwise-accessible repo" and a 404 for "no access to this repo at all"
+    were previously indistinguishable (both hit the same `status in (401,
+    403, 404)` branch below, raising the misleading "check your HF_TOKEN"
+    HFAuthError for a simple unknown-image-id case). Checking the allowlist
+    first means that case now short-circuits into a clean ImageNotFoundError
+    before ever reaching that ambiguous classification.
+    """
+    known = list_images()
+    if image_id not in known:
+        raise ImageNotFoundError(f"No such image '{image_id}'. Known images: {', '.join(known)}")
+
+
 def get_original_path(image_id: str) -> Path:
     """Download (or reuse huggingface_hub's own cached copy of) the original
     .ome.tiff for image_id, returning its local path -- this is what
     detect_artifacts should be pointed at for inference.
     """
+    validate_image_id(image_id)
     try:
         path = hf_hub_download(filename=f"{image_id}{_ORIGINAL_SUFFIX}", **_client_kwargs())
     except HfHubHTTPError as exc:

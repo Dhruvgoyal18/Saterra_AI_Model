@@ -9,20 +9,18 @@ the bucket -- otherwise a private bucket would be unreachable from the
 browser at all. HF_TOKEN never leaves this server.
 """
 
-import json
 import logging
 
 import httpx
-import tifffile
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from . import chat as chat_module
 from . import storage
 from .config import settings
-from .ml.inference import detect_artifacts
-from .ml.tissue import estimate_tissue_mask
-from .schemas import DetectRequest, DetectResponse, ImageInfo, ImagesResponse
+from .detection import run_detection
+from .schemas import ChatRequest, ChatResponse, DetectRequest, DetectResponse, ImageInfo, ImagesResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("artifact-detector")
@@ -55,12 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-with open(settings.preprocessing_config_path) as f:
-    _preprocessing_config = json.load(f)
-TILE_SIZE = _preprocessing_config["tile_size"]
-BACKGROUND_THRESHOLD = _preprocessing_config["background_threshold"]
-
 
 _http_client = httpx.AsyncClient()
 
@@ -124,33 +116,30 @@ def get_display_image(image_id: str) -> FileResponse:
 @app.post("/detect", response_model=DetectResponse, dependencies=[Depends(require_user)])
 def detect(request: DetectRequest) -> DetectResponse:
     try:
-        original_path = storage.get_original_path(request.image_id)
+        return run_detection(request.image_id)
     except storage.HFAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except storage.ImageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    with tifffile.TiffFile(original_path) as tif:
-        image = tif.series[0].levels[0].asarray()
 
-    logger.info("Running detect_artifacts on %s (shape=%s)", request.image_id, image.shape)
-    tissue_mask = estimate_tissue_mask(image)
-    result = detect_artifacts(
-        image,
-        weights_path=settings.model_weights_path,
-        tissue_mask=tissue_mask,
-        tile_size=TILE_SIZE,
-        background_threshold=BACKGROUND_THRESHOLD,
-        prob_threshold=settings.prob_threshold,
-    )
+@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_user)])
+def chat(request: ChatRequest) -> ChatResponse:
+    """Checkpoint 3: natural-language trigger for the same run_detection path
+    /detect uses, via Groq function-calling (see chat.py). Gated by the same
+    require_user dependency as every other data-bearing route -- no new auth
+    model for this endpoint.
 
-    confidence = result["per_tile_confidence"]
-    height, width = image.shape
-    return DetectResponse(
-        image_id=request.image_id,
-        grid_shape=(confidence.shape[0], confidence.shape[1]),
-        tile_confidence=confidence.tolist(),
-        summary=result["summary"],
-        level0_dims=(width, height),
-        tile_size=TILE_SIZE,
-    )
+    storage.ImageNotFoundError/HFAuthError from a bad tool-call argument are
+    deliberately NOT caught here -- chat.py's tool executor already turns
+    those into a tool-result message the LLM phrases as a natural-language
+    decline, which is the whole point of routing them through the model
+    rather than surfacing an HTTP error code for what's really a
+    conversational turn. Only the LLM call itself (a genuine external-service
+    failure, not a user-input problem) gets a clean error here.
+    """
+    try:
+        return chat_module.handle_chat_message(request.message, request.conversation_id)
+    except Exception as exc:
+        logger.exception("Chat completion failed")
+        raise HTTPException(status_code=502, detail=f"Chat service temporarily unavailable: {exc}") from exc

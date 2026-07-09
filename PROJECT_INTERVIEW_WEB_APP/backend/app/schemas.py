@@ -48,3 +48,21 @@ class DetectResponse(BaseModel):
     summary: DetectSummary
     level0_dims: tuple[int, int]  # (W, H)
     tile_size: int
+
+
+class ChatRequest(BaseModel):
+    message: str
+    # None on a conversation's first turn -- the server generates one and
+    # returns it in ChatResponse; the client passes it back on subsequent
+    # turns to continue the same in-memory conversation (see chat.py).
+    conversation_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    # Non-null exactly when this turn's tool call actually ran the model --
+    # same shape DetectResponse already has, so the frontend renders it
+    # through the exact same DetectionCanvas/SummaryPanel components the
+    # button's click handler uses.
+    detection_result: DetectResponse | None = None
+    conversation_id: str

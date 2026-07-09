@@ -2,6 +2,7 @@ import type { Session } from "@supabase/supabase-js";
 import { useEffect, useState } from "react";
 import "./App.css";
 import { detectArtifacts, fetchDisplayImageObjectUrl, fetchImages } from "./api";
+import ChatPanel from "./ChatPanel";
 import DetectionCanvas from "./DetectionCanvas";
 import LoginForm from "./LoginForm";
 import SummaryPanel from "./SummaryPanel";
@@ -105,6 +106,19 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
     }
   }
 
+  // Checkpoint 3: the chat panel's tool call ran the model for some image_id
+  // (not necessarily whatever's currently selected in the dropdown) -- switch
+  // the selection to match, so the existing imageObjectUrl effect (keyed on
+  // selectedId) fetches the right display image, and feed the result into
+  // the same `detection` state the button's handleDetect uses. Same
+  // DetectionCanvas/SummaryPanel rendering path, different trigger.
+  function handleChatDetectionResult(result: DetectResponse) {
+    setSelectedId(result.image_id);
+    setDetection(result);
+    setDetectState("idle");
+    setDetectError(null);
+  }
+
   return (
     <div className="app">
       <div className="user-bar">
@@ -200,6 +214,8 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
           </div>
 
           {detection && <SummaryPanel summary={detection.summary} />}
+
+          <ChatPanel onDetectionResult={handleChatDetectionResult} />
         </div>
       </div>
     </div>

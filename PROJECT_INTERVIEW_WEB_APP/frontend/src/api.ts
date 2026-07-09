@@ -1,5 +1,5 @@
 import { supabase } from "./supabaseClient";
-import type { DetectResponse, ImagesResponse } from "./types";
+import type { ChatApiResponse, DetectResponse, ImagesResponse } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010";
 
@@ -62,6 +62,43 @@ export async function detectArtifacts(imageId: string): Promise<DetectResponse> 
     if (!res.ok) {
       const detail = await res.text();
       throw new Error(`Detection failed: ${res.status} ${detail}`);
+    }
+    return res.json();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(
+        "Request timed out. The inference service may be cold-starting -- try again in a moment."
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Checkpoint 3: natural-language trigger for the same detection path
+// detectArtifacts() above calls -- the backend's /chat may invoke the
+// run_artifact_detection tool under the hood, which is just as slow as a
+// direct /detect call (same cold-start/model-load/tiling cost), so this
+// gets the same generous timeout.
+export async function sendChatMessage(
+  message: string,
+  conversationId: string | null
+): Promise<ChatApiResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DETECT_TIMEOUT_MS);
+
+  try {
+    const headers = { "Content-Type": "application/json", ...(await authHeaders()) };
+    const res = await fetch(`${API_BASE_URL}/chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message, conversation_id: conversationId }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`Chat request failed: ${res.status} ${detail}`);
     }
     return res.json();
   } catch (err) {

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     supabase_url: str | None = None
     supabase_anon_key: str | None = None
 
+    # Groq (OpenAI-compatible chat completions + tool calling) -- backend-only,
+    # same reasoning as hf_token: never sent to the frontend. Powers /chat
+    # (Checkpoint 3). Same fail-fast pattern as the settings above.
+    groq_api_key: str | None = None
+
     # Derived display PNGs are cached here, one file (+ a small dims sidecar)
     # per image, generated the first time that image's display is requested.
     # NOT the same thing as huggingface_hub's own cache for originals, which

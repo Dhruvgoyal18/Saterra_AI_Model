@@ -34,3 +34,13 @@ export interface DetectResponse {
   level0_dims: [number, number]; // [W, H]
   tile_size: number;
 }
+
+// Checkpoint 3: POST /chat's response. detection_result is non-null exactly
+// when the assistant's tool call actually ran the model this turn -- same
+// shape as DetectResponse, rendered through the same DetectionCanvas/
+// SummaryPanel components the button's click handler uses.
+export interface ChatApiResponse {
+  reply: string;
+  detection_result: DetectResponse | null;
+  conversation_id: string;
+}

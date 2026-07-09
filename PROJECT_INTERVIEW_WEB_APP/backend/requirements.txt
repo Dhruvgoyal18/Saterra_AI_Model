@@ -12,3 +12,4 @@ imagecodecs
 torch
 Pillow
 opencv-python-headless
+groq
