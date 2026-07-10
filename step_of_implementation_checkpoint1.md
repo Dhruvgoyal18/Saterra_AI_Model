@@ -515,3 +515,34 @@ test/data_validation.py    # pre-existing: pyramid-level, x/y-swap, y-flip check
 Reproduce end-to-end: `python -m src.train` (~15 min on CPU, writes
 `artifacts/`), then `python -m src.run_test_inference` (writes
 `outputs/test_predictions/`).
+
+---
+
+## 9. Post-Checkpoint-2 re-verification (whole-codebase review, no `src/` changes)
+
+During a full codebase review triggered by Checkpoint 2's deployment work
+(see `PROJECT_INTERVIEW_WEB_APP/steps_of_implementation_checkpoint2.md` §13
+for the complete findings list), every file in `src/` and `test/` was
+re-read against what Checkpoint 2's `backend/app/ml/` claims to vendor from
+it. Two things worth recording here specifically, since they concern this
+checkpoint's own code, not the web app:
+
+- **Vendored-copy fidelity confirmed.** `backend/app/ml/model.py`,
+  `preprocessing.py` (vs. this checkpoint's `dataset.py`'s normalization
+  functions), `tissue.py` (vs. `masks.py`'s `estimate_tissue_mask`), and
+  `inference.py` are all still byte-for-byte identical to their `src/`
+  originals. The "vendor, don't import across project trees" decision from
+  Checkpoint 2 (deployment independence) hasn't drifted into a subtly
+  different reimplementation.
+- **Dead dependency found in the root `requirements.txt`:** `torchvision` is
+  listed but never imported anywhere in `src/` or `test/` (confirmed by a
+  full-tree grep) -- `model.py` defines `SmallCNN` from scratch and never
+  touches `torchvision`'s pretrained models or transforms. Safe to drop; not
+  removed yet since this pass was review-only, no code/dependency changes
+  made to this checkpoint's tree.
+
+No other issues found in `src/`'s own logic (masks/tiling/dataset/model/
+metrics/train/inference/run_test_inference) beyond what's already documented
+above -- the tissue-mask block-cropping edge behavior (§1) and the LOIO CV
+design (§3) were both re-checked against the actual code and match this
+document's description exactly.
