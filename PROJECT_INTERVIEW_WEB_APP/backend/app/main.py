@@ -54,7 +54,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_http_client = httpx.AsyncClient()
+_http_client = httpx.AsyncClient(timeout=10.0)
 
 
 async def require_user(authorization: str | None = Header(None)) -> dict:
@@ -68,10 +68,18 @@ async def require_user(authorization: str | None = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization.removeprefix("Bearer ")
-    resp = await _http_client.get(
-        f"{settings.supabase_url}/auth/v1/user",
-        headers={"Authorization": f"Bearer {token}", "apikey": settings.supabase_anon_key},
-    )
+    try:
+        resp = await _http_client.get(
+            f"{settings.supabase_url}/auth/v1/user",
+            headers={"Authorization": f"Bearer {token}", "apikey": settings.supabase_anon_key},
+        )
+    except httpx.TransportError as exc:
+        # A transient network hiccup reaching Supabase (seen in practice: a
+        # slow response tripped httpx's default timeout) previously surfaced
+        # as an unhandled 500 with a raw traceback -- this is a real,
+        # retryable condition, not an invalid session, so it gets its own
+        # clear 503 instead of being indistinguishable from a code bug.
+        raise HTTPException(status_code=503, detail="Auth service temporarily unavailable -- try again") from exc
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return resp.json()
