@@ -133,6 +133,24 @@ def _execute_tool_call(name: str, arguments: dict):
     return {"error": f"Unknown tool '{name}'"}, None
 
 
+def _looks_like_malformed_tool_call(content: str | None) -> bool:
+    """Groq's Llama-3.3-70B occasionally hallucinates a pseudo-function-call as
+    plain text (e.g. '<function.run_artifact_detection {"image_id": "Image_7"}>
+    </function>') instead of using the real tool-calling protocol -- observed in
+    testing specifically after a prior successful tool call earlier in the same
+    conversation (~1-in-4 failure rate reproduced against the deployed
+    list_images -> run_artifact_detection sequence). Not fixable by a schema
+    change (tried giving list_images a non-empty parameter -- made it worse,
+    surfacing as an outright 400 tool_use_failed with the same malformed
+    pattern instead). This is inherent model flakiness, not a bug in this
+    code's use of the tool-calling API, so the mitigation is a one-time retry
+    of the same request rather than a code-level fix -- reduces the effective
+    failure rate, doesn't guarantee eliminating it (a retry can, in principle,
+    fail the same way).
+    """
+    return content is not None and "<function" in content
+
+
 def handle_chat_message(message: str, conversation_id: str | None) -> ChatResponse:
     conv_id = conversation_id if conversation_id in _conversations else str(uuid.uuid4())
     history = _conversations.setdefault(conv_id, [{"role": "system", "content": SYSTEM_PROMPT}])
@@ -143,6 +161,13 @@ def handle_chat_message(message: str, conversation_id: str | None) -> ChatRespon
         model=_MODEL, messages=history, tools=TOOLS, tool_choice="auto"
     )
     choice = response.choices[0].message
+
+    if not choice.tool_calls and _looks_like_malformed_tool_call(choice.content):
+        logger.warning("Malformed pseudo-tool-call detected, retrying once: %r", choice.content)
+        response = _client.chat.completions.create(
+            model=_MODEL, messages=history, tools=TOOLS, tool_choice="auto"
+        )
+        choice = response.choices[0].message
 
     detection_result = None
 
