@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from . import config
+from . import config, hf_data
 from .dataset import ArtifactTileDataset, compute_percentile_norm_stats, load_dapi_image
 from .masks import build_masks
 from .metrics import compute_classification_metrics, compute_iou
@@ -33,7 +33,9 @@ def prepare_image_data(image_ids: list[int]) -> tuple[dict, dict, dict, dict]:
         images[image_id] = image
         norm_stats[image_id] = compute_percentile_norm_stats(image)
 
-        geojson_path = config.ANNOTATION_DIR / f"artifact_annotation_image_{image_id}.geojson"
+        geojson_path = hf_data.download_annotation(image_id)
+        if geojson_path is None:
+            raise ValueError(f"No annotation found in the HF repo for Image_{image_id} -- is this really labeled?")
         m = build_masks(geojson_path, image.shape)
         masks[image_id] = m
 
@@ -100,13 +102,18 @@ def _predict(model: SmallCNN, records, images, norm_stats, batch_size: int, devi
 
 
 def run_loio_cv(
-    image_ids: list[int] = config.LABELED_IMAGE_IDS,
+    image_ids: list[int] | None = None,
     epochs: int = config.EPOCHS,
     batch_size: int = config.BATCH_SIZE,
     lr: float = config.LEARNING_RATE,
     device: str = "cpu",
     seed: int = config.RANDOM_SEED,
 ) -> dict:
+    if image_ids is None:
+        image_ids, _ = hf_data.discover_image_ids()
+    if not image_ids:
+        raise ValueError("No labeled images found in the HF dataset repo (no matching .geojson files).")
+
     torch.manual_seed(seed)
 
     print("Preparing tile records for all labeled images...")
@@ -166,21 +173,26 @@ def run_loio_cv(
 
 
 def train_final_model(
-    image_ids: list[int] = config.LABELED_IMAGE_IDS,
+    image_ids: list[int] | None = None,
     epochs: int = config.EPOCHS,
     batch_size: int = config.BATCH_SIZE,
     lr: float = config.LEARNING_RATE,
     device: str = "cpu",
     seed: int = config.RANDOM_SEED,
 ) -> SmallCNN:
-    """Train on all 5 labeled images combined -- this is the deployed model.
+    """Train on all labeled images combined -- this is the deployed model.
 
     LOIO CV above is purely for *evaluating* expected generalization; once
     that's reported, the model actually shipped in detect_artifacts() should
-    use every labeled pixel available, since none of the 5 images can be
-    "held out" once training data is this scarce and the real held-out set is
-    the 3 unlabeled images anyway (evaluated qualitatively, not numerically).
+    use every labeled pixel available, since none of the labeled images can
+    be "held out" once training data is this scarce and the real held-out set
+    is the unlabeled images anyway (evaluated qualitatively, not numerically).
     """
+    if image_ids is None:
+        image_ids, _ = hf_data.discover_image_ids()
+    if not image_ids:
+        raise ValueError("No labeled images found in the HF dataset repo (no matching .geojson files).")
+
     torch.manual_seed(seed)
     print("\n--- Training final model on all labeled images ---")
     images, norm_stats, _, tile_records = prepare_image_data(image_ids)
@@ -217,7 +229,8 @@ def save_preprocessing_config(path=config.PREPROCESSING_CONFIG_PATH) -> None:
 if __name__ == "__main__":
     cv_results = run_loio_cv()
     save_results(cv_results)
-    print("\n=== LOIO CV aggregate (mean +/- std across 5 folds) ===")
+    n_folds = len(cv_results["folds"])
+    print(f"\n=== LOIO CV aggregate (mean +/- std across {n_folds} folds) ===")
     for key, stats in cv_results["aggregate"].items():
         print(f"  {key}: {stats['mean']:.3f} +/- {stats['std']:.3f}")
 
