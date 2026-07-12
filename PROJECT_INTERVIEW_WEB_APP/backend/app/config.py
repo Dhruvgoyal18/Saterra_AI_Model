@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # is managed entirely by huggingface_hub itself (see storage/hf_storage.py).
     hf_display_cache_dir: Path = Path(__file__).resolve().parent.parent / ".cache" / "display"
 
+    # Generated deep-zoom (DZI) tile pyramid cache: one JPEG per
+    # (image_id, level, col, row) plus a small per-image meta sidecar
+    # (dims, max_level, normalization stats), generated the first time that
+    # image's deep-zoom view is opened. Independent of hf_display_cache_dir
+    # above -- deliberately a separate directory, not a shared sidecar
+    # format, so this feature's entire on-disk footprint is one new directory
+    # (see storage/tile_storage.py).
+    hf_tile_cache_dir: Path = Path(__file__).resolve().parent.parent / ".cache" / "tiles"
+
     # Model
     model_weights_path: Path = Path(__file__).resolve().parent / "ml" / "weights" / "model_final.pt"
     preprocessing_config_path: Path = Path(__file__).resolve().parent / "ml" / "weights" / "preprocessing_config.json"

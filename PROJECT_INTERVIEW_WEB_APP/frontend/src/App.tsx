@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { detectArtifacts, fetchDisplayImageObjectUrl, fetchImages } from "./api";
 import ChatPanel from "./ChatPanel";
+import DeepZoomCanvas from "./DeepZoomCanvas";
 import DetectionCanvas from "./DetectionCanvas";
 import LoginForm from "./LoginForm";
 import SummaryPanel from "./SummaryPanel";
@@ -45,6 +46,11 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
   const [showUncertainty, setShowUncertainty] = useState(false);
   const [overlayAlpha, setOverlayAlpha] = useState(0.45);
   const [imagesError, setImagesError] = useState<string | null>(null);
+  // Additive: default "flat" preserves today's exact behavior. "deepzoom"
+  // switches to DeepZoomCanvas (a real pan/zoom tile pyramid) instead of the
+  // single flat downsampled PNG -- DetectionCanvas.tsx itself is untouched,
+  // so this feature can be abandoned by simply never flipping this toggle.
+  const [viewMode, setViewMode] = useState<"flat" | "deepzoom">("flat");
 
   useEffect(() => {
     fetchImages()
@@ -178,6 +184,15 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
             onChange={(e) => setOverlayAlpha(Number(e.target.value))}
           />
         </label>
+
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={viewMode === "deepzoom"}
+            onChange={(e) => setViewMode(e.target.checked ? "deepzoom" : "flat")}
+          />
+          Deep-zoom view (experimental)
+        </label>
       </div>
 
       {detectState === "loading" && (
@@ -191,9 +206,18 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
 
       <div className="main-content">
         <div className="canvas-wrapper">
-          {selectedImage && (
+          {selectedImage && viewMode === "flat" && (
             <DetectionCanvas
               imageObjectUrl={imageObjectUrl}
+              detection={detection}
+              showOverlay={showOverlay}
+              showUncertainty={showUncertainty}
+              overlayAlpha={overlayAlpha}
+            />
+          )}
+          {selectedImage && viewMode === "deepzoom" && (
+            <DeepZoomCanvas
+              imageId={selectedId}
               detection={detection}
               showOverlay={showOverlay}
               showUncertainty={showUncertainty}
