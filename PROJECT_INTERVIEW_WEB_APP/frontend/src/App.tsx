@@ -9,7 +9,7 @@ import DetectionCanvas from "./DetectionCanvas";
 import LoginForm from "./LoginForm";
 import SummaryPanel from "./SummaryPanel";
 import { supabase } from "./supabaseClient";
-import type { DetectResponse, DisplayOptions, ImageInfo } from "./types";
+import type { DetectResponse, ImageInfo } from "./types";
 
 type LoadState = "idle" | "loading" | "error";
 
@@ -129,26 +129,6 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
     setDetection(result);
     setDetectState("idle");
     setDetectError(null);
-  }
-
-  // Checkpoint 3 (new-tools): the chat panel's set_display_options tool call
-  // -- a rendering-preference change, not a detection. Only the fields the
-  // user actually asked to change are present (see chat.py's DisplayOptions,
-  // built with exclude_none-equivalent optionality), so each field is
-  // applied independently rather than replacing the whole display state.
-  function handleChatDisplayOptions(options: DisplayOptions) {
-    if (options.overlay_color !== null && options.overlay_color !== undefined) {
-      setOverlayColor(options.overlay_color as OverlayColorName);
-    }
-    if (options.show_overlay !== null && options.show_overlay !== undefined) {
-      setShowOverlay(options.show_overlay);
-    }
-    if (options.show_uncertainty !== null && options.show_uncertainty !== undefined) {
-      setShowUncertainty(options.show_uncertainty);
-    }
-    if (options.view_mode !== null && options.view_mode !== undefined) {
-      setViewMode(options.view_mode);
-    }
   }
 
   return (
@@ -278,7 +258,7 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
 
           {detection && <SummaryPanel summary={detection.summary} />}
 
-          <ChatPanel onDetectionResult={handleChatDetectionResult} onDisplayOptions={handleChatDisplayOptions} />
+          <ChatPanel onDetectionResult={handleChatDetectionResult} />
         </div>
       </div>
     </div>
