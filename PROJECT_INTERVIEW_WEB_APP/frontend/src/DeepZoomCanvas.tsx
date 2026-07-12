@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import OpenSeadragon from "openseadragon";
 import type { DetectResponse } from "./types";
 import { API_BASE_URL, authHeaders } from "./api";
-import { confidenceToRgba, isUncertain } from "./colormap";
+import { confidenceToRgba, DEFAULT_OVERLAY_COLOR, isUncertain, type OverlayColorName } from "./colormap";
 
 interface Props {
   imageId: string | null;
@@ -10,6 +10,7 @@ interface Props {
   showOverlay: boolean;
   showUncertainty: boolean;
   overlayAlpha: number;
+  overlayColor?: OverlayColorName;
 }
 
 // Overlay canvas resolution: pixels per grid cell. Grid is at most ~144x144
@@ -32,7 +33,14 @@ const OVERLAY_PX_PER_CELL = 8;
 // Takes imageId (not an object URL/blob) -- OpenSeadragon builds its own DZI
 // descriptor + tile request URLs internally; there's no single blob for it
 // to consume the way DetectionCanvas's <img> load has.
-export default function DeepZoomCanvas({ imageId, detection, showOverlay, showUncertainty, overlayAlpha }: Props) {
+export default function DeepZoomCanvas({
+  imageId,
+  detection,
+  showOverlay,
+  showUncertainty,
+  overlayAlpha,
+  overlayColor = DEFAULT_OVERLAY_COLOR,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<OpenSeadragon.Viewer | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -49,10 +57,12 @@ export default function DeepZoomCanvas({ imageId, detection, showOverlay, showUn
   const showOverlayRef = useRef(showOverlay);
   const showUncertaintyRef = useRef(showUncertainty);
   const overlayAlphaRef = useRef(overlayAlpha);
+  const overlayColorRef = useRef(overlayColor);
   detectionRef.current = detection;
   showOverlayRef.current = showOverlay;
   showUncertaintyRef.current = showUncertainty;
   overlayAlphaRef.current = overlayAlpha;
+  overlayColorRef.current = overlayColor;
 
   useEffect(() => {
     if (!containerRef.current || !imageId) return;
@@ -107,7 +117,14 @@ export default function DeepZoomCanvas({ imageId, detection, showOverlay, showUn
         canvas.style.height = "100%";
         overlayCanvasRef.current = canvas;
         viewer.addOverlay(canvas, tiledImage.getBounds());
-        redrawOverlay(canvas, detectionRef.current, showOverlayRef.current, showUncertaintyRef.current, overlayAlphaRef.current);
+        redrawOverlay(
+          canvas,
+          detectionRef.current,
+          showOverlayRef.current,
+          showUncertaintyRef.current,
+          overlayAlphaRef.current,
+          overlayColorRef.current
+        );
       });
     });
 
@@ -127,8 +144,8 @@ export default function DeepZoomCanvas({ imageId, detection, showOverlay, showUn
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
-    redrawOverlay(canvas, detection, showOverlay, showUncertainty, overlayAlpha);
-  }, [detection, showOverlay, showUncertainty, overlayAlpha]);
+    redrawOverlay(canvas, detection, showOverlay, showUncertainty, overlayAlpha, overlayColor);
+  }, [detection, showOverlay, showUncertainty, overlayAlpha, overlayColor]);
 
   return (
     <div
@@ -143,7 +160,8 @@ function redrawOverlay(
   detection: DetectResponse | null,
   showOverlay: boolean,
   showUncertainty: boolean,
-  overlayAlpha: number
+  overlayAlpha: number,
+  overlayColor: OverlayColorName
 ) {
   if (!detection || !showOverlay) {
     canvas.width = 0;
@@ -177,7 +195,7 @@ function redrawOverlay(
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, tileW, tileH);
       } else {
-        ctx.fillStyle = confidenceToRgba(confidence, overlayAlpha);
+        ctx.fillStyle = confidenceToRgba(confidence, overlayAlpha, overlayColor);
         ctx.fillRect(x, y, tileW, tileH);
       }
     }

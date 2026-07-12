@@ -35,12 +35,27 @@ export interface DetectResponse {
   tile_size: number;
 }
 
+// Checkpoint 3 (new-tools): a rendering-preference change requested via chat
+// (set_display_options), distinct from a detection -- never touches the
+// model, only changes what's drawn. Fields are independently nullable since
+// a request like "show me the artifacts in green" only sets overlay_color.
+export interface DisplayOptions {
+  overlay_color: string | null;
+  show_overlay: boolean | null;
+  show_uncertainty: boolean | null;
+  view_mode: "flat" | "deepzoom" | null;
+}
+
 // Checkpoint 3: POST /chat's response. detection_result is non-null exactly
 // when the assistant's tool call actually ran the model this turn -- same
 // shape as DetectResponse, rendered through the same DetectionCanvas/
-// SummaryPanel components the button's click handler uses.
+// SummaryPanel components the button's click handler uses. display_options
+// is non-null exactly when the turn's tool call was set_display_options
+// instead -- the two are mutually exclusive in practice (one tool call per
+// turn today) but independently optional in the type.
 export interface ChatApiResponse {
   reply: string;
   detection_result: DetectResponse | null;
+  display_options: DisplayOptions | null;
   conversation_id: string;
 }

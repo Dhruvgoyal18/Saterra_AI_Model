@@ -58,6 +58,21 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
 
 
+class DisplayOptions(BaseModel):
+    """A rendering preference change requested via chat (Checkpoint 3's
+    set_display_options tool) -- deliberately separate from DetectResponse:
+    this never touches the model or HF Hub, it's purely instructions for how
+    the frontend should render whatever it's already showing. All fields
+    optional so a request like "show me the artifacts in green" only carries
+    overlay_color, not a forced reset of every other display setting.
+    """
+
+    overlay_color: str | None = None
+    show_overlay: bool | None = None
+    show_uncertainty: bool | None = None
+    view_mode: str | None = None  # "flat" | "deepzoom"
+
+
 class ChatResponse(BaseModel):
     reply: str
     # Non-null exactly when this turn's tool call actually ran the model --
@@ -65,4 +80,10 @@ class ChatResponse(BaseModel):
     # through the exact same DetectionCanvas/SummaryPanel components the
     # button's click handler uses.
     detection_result: DetectResponse | None = None
+    # Non-null exactly when this turn's tool call was set_display_options --
+    # mutually exclusive with detection_result in practice (one tool call per
+    # turn in this demo), but both are independently optional in the schema
+    # rather than a single tagged union, since that's simpler for the
+    # frontend to consume (two independent "did this happen" checks).
+    display_options: DisplayOptions | None = None
     conversation_id: str

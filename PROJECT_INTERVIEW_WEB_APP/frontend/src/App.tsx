@@ -3,12 +3,13 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { detectArtifacts, fetchDisplayImageObjectUrl, fetchImages } from "./api";
 import ChatPanel from "./ChatPanel";
+import { DEFAULT_OVERLAY_COLOR, OVERLAY_COLOR_PALETTE, type OverlayColorName } from "./colormap";
 import DeepZoomCanvas from "./DeepZoomCanvas";
 import DetectionCanvas from "./DetectionCanvas";
 import LoginForm from "./LoginForm";
 import SummaryPanel from "./SummaryPanel";
 import { supabase } from "./supabaseClient";
-import type { DetectResponse, ImageInfo } from "./types";
+import type { DetectResponse, DisplayOptions, ImageInfo } from "./types";
 
 type LoadState = "idle" | "loading" | "error";
 
@@ -51,6 +52,11 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
   // single flat downsampled PNG -- DetectionCanvas.tsx itself is untouched,
   // so this feature can be abandoned by simply never flipping this toggle.
   const [viewMode, setViewMode] = useState<"flat" | "deepzoom">("flat");
+  // Additive, same "default preserves today's behavior" discipline as
+  // viewMode above: DEFAULT_OVERLAY_COLOR matches the old hardcoded RED
+  // exactly, so leaving this untouched reproduces today's colors pixel-for-
+  // pixel.
+  const [overlayColor, setOverlayColor] = useState<OverlayColorName>(DEFAULT_OVERLAY_COLOR);
 
   useEffect(() => {
     fetchImages()
@@ -125,6 +131,26 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
     setDetectError(null);
   }
 
+  // Checkpoint 3 (new-tools): the chat panel's set_display_options tool call
+  // -- a rendering-preference change, not a detection. Only the fields the
+  // user actually asked to change are present (see chat.py's DisplayOptions,
+  // built with exclude_none-equivalent optionality), so each field is
+  // applied independently rather than replacing the whole display state.
+  function handleChatDisplayOptions(options: DisplayOptions) {
+    if (options.overlay_color !== null && options.overlay_color !== undefined) {
+      setOverlayColor(options.overlay_color as OverlayColorName);
+    }
+    if (options.show_overlay !== null && options.show_overlay !== undefined) {
+      setShowOverlay(options.show_overlay);
+    }
+    if (options.show_uncertainty !== null && options.show_uncertainty !== undefined) {
+      setShowUncertainty(options.show_uncertainty);
+    }
+    if (options.view_mode !== null && options.view_mode !== undefined) {
+      setViewMode(options.view_mode);
+    }
+  }
+
   return (
     <div className="app">
       <div className="user-bar">
@@ -193,6 +219,17 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
           />
           Deep-zoom view (experimental)
         </label>
+
+        <label>
+          Artifact color:
+          <select value={overlayColor} onChange={(e) => setOverlayColor(e.target.value as OverlayColorName)}>
+            {Object.keys(OVERLAY_COLOR_PALETTE).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {detectState === "loading" && (
@@ -213,6 +250,7 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
               showOverlay={showOverlay}
               showUncertainty={showUncertainty}
               overlayAlpha={overlayAlpha}
+              overlayColor={overlayColor}
             />
           )}
           {selectedImage && viewMode === "deepzoom" && (
@@ -222,6 +260,7 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
               showOverlay={showOverlay}
               showUncertainty={showUncertainty}
               overlayAlpha={overlayAlpha}
+              overlayColor={overlayColor}
             />
           )}
         </div>
@@ -239,7 +278,7 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
 
           {detection && <SummaryPanel summary={detection.summary} />}
 
-          <ChatPanel onDetectionResult={handleChatDetectionResult} />
+          <ChatPanel onDetectionResult={handleChatDetectionResult} onDisplayOptions={handleChatDisplayOptions} />
         </div>
       </div>
     </div>

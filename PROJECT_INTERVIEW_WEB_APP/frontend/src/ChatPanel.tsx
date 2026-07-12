@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { sendChatMessage } from "./api";
-import type { DetectResponse } from "./types";
+import type { DetectResponse, DisplayOptions } from "./types";
 
 interface ChatBubble {
   role: "user" | "assistant";
@@ -13,9 +13,13 @@ interface Props {
   // handler uses, so the result renders through the exact same
   // DetectionCanvas/SummaryPanel components, not a second rendering path.
   onDetectionResult: (result: DetectResponse) => void;
+  // Called when a turn's tool call was set_display_options instead -- a
+  // rendering-preference change (overlay color/visibility/view mode), never
+  // a detection.
+  onDisplayOptions: (options: DisplayOptions) => void;
 }
 
-export default function ChatPanel({ onDetectionResult }: Props) {
+export default function ChatPanel({ onDetectionResult, onDisplayOptions }: Props) {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -38,6 +42,9 @@ export default function ChatPanel({ onDetectionResult }: Props) {
       setMessages((prev) => [...prev, { role: "assistant", content: res.reply }]);
       if (res.detection_result) {
         onDetectionResult(res.detection_result);
+      }
+      if (res.display_options) {
+        onDisplayOptions(res.display_options);
       }
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err));
