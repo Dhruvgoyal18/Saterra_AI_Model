@@ -7,10 +7,13 @@ whole pipeline can be re-tuned (tile size, tau, thresholds) from one place.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DAPI_DIR = ROOT / "DAPI_images"
-ANNOTATION_DIR = ROOT / "artifact_annotations"
 ARTIFACTS_DIR = ROOT / "artifacts"  # trained weights + preprocessing config + CV results
 OUTPUTS_DIR = ROOT / "outputs"  # overlays, predictions, reports (visual, human-facing)
+# No local DAPI_DIR/ANNOTATION_DIR anymore -- images and annotations are
+# fetched from the private HF dataset repo (see hf_data.py), the single
+# source of truth for training data, same as the deployed web app already
+# does for inference. See hf_data.discover_image_ids() for the labeled/
+# unlabeled split this file used to hardcode.
 
 TISSUE_CLASS_NAME = "Tissue"
 ARTIFACT_CLASS_PREFIX = "Artifact"  # matches "Artifact - folds", "Artifact - *", etc.
@@ -23,10 +26,6 @@ BACKGROUND_THRESHOLD = 0.5  # a tile needs >= this much tissue coverage to be ke
 # --- Intensity normalization ---
 INTENSITY_LOW_PCTILE = 1.0
 INTENSITY_HIGH_PCTILE = 99.0
-
-# --- Data splits ---
-LABELED_IMAGE_IDS = [1, 2, 3, 4, 5]
-UNLABELED_IMAGE_IDS = [6, 7, 8]
 
 RANDOM_SEED = 42
 

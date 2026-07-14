@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from . import config
+from . import config, hf_data
 from .dataset import load_dapi_image
 from .inference import detect_artifacts
 from .masks import estimate_tissue_mask
@@ -44,7 +44,12 @@ def save_overlay(image: np.ndarray, mask: np.ndarray, out_path, title: str, step
     plt.close()
 
 
-def run(image_ids: list[int] = config.UNLABELED_IMAGE_IDS) -> dict:
+def run(image_ids: list[int] | None = None) -> dict:
+    if image_ids is None:
+        _, image_ids = hf_data.discover_image_ids()
+    if not image_ids:
+        raise ValueError("No unlabeled images found in the HF dataset repo (every image has a matching .geojson).")
+
     out_dir = config.OUTPUTS_DIR / "test_predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
 

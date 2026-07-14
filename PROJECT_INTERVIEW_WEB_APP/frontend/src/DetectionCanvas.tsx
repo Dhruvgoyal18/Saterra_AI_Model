@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { DetectResponse } from "./types";
-import { confidenceToRgba, isUncertain } from "./colormap";
+import { confidenceToRgba, DEFAULT_OVERLAY_COLOR, isUncertain, type OverlayColorName } from "./colormap";
 
 interface Props {
   // An object URL (from URL.createObjectURL), not a plain API URL -- the
@@ -13,6 +13,7 @@ interface Props {
   showOverlay: boolean;
   showUncertainty: boolean;
   overlayAlpha: number;
+  overlayColor?: OverlayColorName;
 }
 
 // Everything -- the base display image and the confidence-grid overlay -- is
@@ -36,6 +37,7 @@ export default function DetectionCanvas({
   showOverlay,
   showUncertainty,
   overlayAlpha,
+  overlayColor = DEFAULT_OVERLAY_COLOR,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -57,11 +59,11 @@ export default function DetectionCanvas({
       ctx.drawImage(img, 0, 0, displayW, displayH);
 
       if (showOverlay && detection) {
-        drawOverlay(ctx, detection, displayW, displayH, showUncertainty, overlayAlpha);
+        drawOverlay(ctx, detection, displayW, displayH, showUncertainty, overlayAlpha, overlayColor);
       }
     };
     img.src = imageObjectUrl;
-  }, [imageObjectUrl, detection, showOverlay, showUncertainty, overlayAlpha]);
+  }, [imageObjectUrl, detection, showOverlay, showUncertainty, overlayAlpha, overlayColor]);
 
   return (
     <canvas
@@ -77,7 +79,8 @@ function drawOverlay(
   displayW: number,
   displayH: number,
   showUncertainty: boolean,
-  overlayAlpha: number
+  overlayAlpha: number,
+  overlayColor: OverlayColorName
 ) {
   const [rows, cols] = detection.grid_shape;
   const [level0W, level0H] = detection.level0_dims;
@@ -107,7 +110,7 @@ function drawOverlay(
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, tileDisplayW, tileDisplayH);
       } else {
-        ctx.fillStyle = confidenceToRgba(confidence, overlayAlpha);
+        ctx.fillStyle = confidenceToRgba(confidence, overlayAlpha, overlayColor);
         ctx.fillRect(x, y, tileDisplayW, tileDisplayH);
       }
     }

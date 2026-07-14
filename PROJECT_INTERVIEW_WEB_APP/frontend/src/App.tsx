@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { detectArtifacts, fetchDisplayImageObjectUrl, fetchImages } from "./api";
 import ChatPanel from "./ChatPanel";
+import { DEFAULT_OVERLAY_COLOR, OVERLAY_COLOR_PALETTE, type OverlayColorName } from "./colormap";
+import DeepZoomCanvas from "./DeepZoomCanvas";
 import DetectionCanvas from "./DetectionCanvas";
 import LoginForm from "./LoginForm";
 import SummaryPanel from "./SummaryPanel";
@@ -45,6 +47,16 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
   const [showUncertainty, setShowUncertainty] = useState(false);
   const [overlayAlpha, setOverlayAlpha] = useState(0.45);
   const [imagesError, setImagesError] = useState<string | null>(null);
+  // Additive: default "flat" preserves today's exact behavior. "deepzoom"
+  // switches to DeepZoomCanvas (a real pan/zoom tile pyramid) instead of the
+  // single flat downsampled PNG -- DetectionCanvas.tsx itself is untouched,
+  // so this feature can be abandoned by simply never flipping this toggle.
+  const [viewMode, setViewMode] = useState<"flat" | "deepzoom">("flat");
+  // Additive, same "default preserves today's behavior" discipline as
+  // viewMode above: DEFAULT_OVERLAY_COLOR matches the old hardcoded RED
+  // exactly, so leaving this untouched reproduces today's colors pixel-for-
+  // pixel.
+  const [overlayColor, setOverlayColor] = useState<OverlayColorName>(DEFAULT_OVERLAY_COLOR);
 
   useEffect(() => {
     fetchImages()
@@ -178,6 +190,26 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
             onChange={(e) => setOverlayAlpha(Number(e.target.value))}
           />
         </label>
+
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={viewMode === "deepzoom"}
+            onChange={(e) => setViewMode(e.target.checked ? "deepzoom" : "flat")}
+          />
+          Deep-zoom view (experimental)
+        </label>
+
+        <label>
+          Artifact color:
+          <select value={overlayColor} onChange={(e) => setOverlayColor(e.target.value as OverlayColorName)}>
+            {Object.keys(OVERLAY_COLOR_PALETTE).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {detectState === "loading" && (
@@ -191,13 +223,24 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
 
       <div className="main-content">
         <div className="canvas-wrapper">
-          {selectedImage && (
+          {selectedImage && viewMode === "flat" && (
             <DetectionCanvas
               imageObjectUrl={imageObjectUrl}
               detection={detection}
               showOverlay={showOverlay}
               showUncertainty={showUncertainty}
               overlayAlpha={overlayAlpha}
+              overlayColor={overlayColor}
+            />
+          )}
+          {selectedImage && viewMode === "deepzoom" && (
+            <DeepZoomCanvas
+              imageId={selectedId}
+              detection={detection}
+              showOverlay={showOverlay}
+              showUncertainty={showUncertainty}
+              overlayAlpha={overlayAlpha}
+              overlayColor={overlayColor}
             />
           )}
         </div>

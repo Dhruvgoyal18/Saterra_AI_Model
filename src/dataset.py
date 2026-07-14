@@ -1,19 +1,17 @@
 """Image loading, per-image percentile normalization, and the tile Dataset."""
 
-from pathlib import Path
-
 import numpy as np
 import tifffile
 import torch
 from torch.utils.data import Dataset
 
-from . import config
+from . import config, hf_data
 from .tiling import TileRecord
 
 
 def load_dapi_image(image_id: int) -> np.ndarray:
     """Load pyramid level 0 explicitly (see test/data_validation.py for why)."""
-    path = config.DAPI_DIR / f"Image_{image_id}.ome.tiff"
+    path = hf_data.download_image(image_id)
     with tifffile.TiffFile(path) as tif:
         return tif.series[0].levels[0].asarray()
 

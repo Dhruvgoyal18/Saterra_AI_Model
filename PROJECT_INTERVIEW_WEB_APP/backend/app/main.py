@@ -14,7 +14,7 @@ import logging
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from . import chat as chat_module
 from . import storage
@@ -119,6 +119,43 @@ def get_display_image(image_id: str) -> FileResponse:
     except storage.ImageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(png_path, media_type="image/png")
+
+
+@app.get("/images/{image_id}/dzi.dzi", dependencies=[Depends(require_user)])
+def get_dzi_descriptor(image_id: str) -> Response:
+    """Deep Zoom XML descriptor for image_id -- what OpenSeadragon's
+    `tileSources` option points at to open a real pan/zoom tile pyramid,
+    generated server-side since these .ome.tiff files have no native
+    multi-resolution pyramid of their own (see ml/tiling.py)."""
+    try:
+        xml = storage.get_dzi_descriptor_xml(image_id)
+    except storage.HFAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except storage.ImageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(content=xml, media_type="application/xml")
+
+
+@app.get("/images/{image_id}/dzi_files/{level}/{tile_name}", dependencies=[Depends(require_user)])
+def get_dzi_tile(image_id: str, level: int, tile_name: str) -> FileResponse:
+    """One deep-zoom tile, e.g. tile_name="3_5.jpeg" -- DZI's own filename
+    convention (col_row.ext), parsed by hand since it isn't a FastAPI
+    path-converter pattern."""
+    try:
+        col_str, row_str = tile_name.removesuffix(".jpeg").split("_")
+        col, row = int(col_str), int(row_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Malformed tile name '{tile_name}'") from exc
+
+    try:
+        tile_path = storage.get_or_build_tile(image_id, level, col, row)
+    except storage.HFAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except storage.ImageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except storage.InvalidTileError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(tile_path, media_type="image/jpeg")
 
 
 @app.post("/detect", response_model=DetectResponse, dependencies=[Depends(require_user)])

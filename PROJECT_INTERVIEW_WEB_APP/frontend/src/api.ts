@@ -1,7 +1,7 @@
 import { supabase } from "./supabaseClient";
 import type { ChatApiResponse, DetectResponse, ImagesResponse } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010";
 
 // Free-tier hosts (HF Spaces) sleep when idle -- the first request after that
 // can take 30-60s (model load + bucket fetch + tiling ~20k tiles on CPU).
@@ -13,7 +13,7 @@ const DETECT_TIMEOUT_MS = 120_000;
 // it once at login -- Supabase access tokens expire (1hr default) and the
 // client auto-refreshes the underlying session, so capturing the string
 // once would silently start failing with 401s an hour into a session.
-async function authHeaders(): Promise<Record<string, string>> {
+export async function authHeaders(): Promise<Record<string, string>> {
   const {
     data: { session },
   } = await supabase.auth.getSession();
