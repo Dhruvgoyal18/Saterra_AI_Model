@@ -51,15 +51,27 @@ class Settings(BaseSettings):
     # (see storage/tile_storage.py).
     hf_tile_cache_dir: Path = Path(__file__).resolve().parent.parent / ".cache" / "tiles"
 
-    # Model
+    # Model -- still used by the pre-Modal in-process path until the
+    # inference_endpoint_url cutover (below) is verified end-to-end; removed
+    # in the final cleanup step of that split.
     model_weights_path: Path = Path(__file__).resolve().parent / "ml" / "weights" / "model_final.pt"
     preprocessing_config_path: Path = Path(__file__).resolve().parent / "ml" / "weights" / "preprocessing_config.json"
+
+    # Checkpoint 2 cloud-inference split: model inference runs on its own
+    # hosted Modal endpoint (../../inference_service), not in this process.
+    # inference_service_token is a distinct shared secret from hf_token --
+    # the Modal app is a different account/platform entirely, so it gets its
+    # own credential rather than reusing the HF dataset-repo token.
+    inference_endpoint_url: str | None = None
+    inference_service_token: str | None = None
 
     # CORS -- "*" is fine for a demo; restrict to the deployed frontend origin in production.
     cors_origins: str = "*"
 
-    # Inference
-    prob_threshold: float = 0.5
+    # Inference -- 0.7 chosen as the argmax-F1 point of a pooled 5-fold LOIO
+    # out-of-fold threshold sweep (precision 0.163->0.243, recall 0.762->0.578,
+    # f1 0.269->0.342 vs. the old 0.5 default); see artifacts/threshold_sweep_results.json.
+    prob_threshold: float = 0.7
 
 
 settings = Settings()

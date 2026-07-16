@@ -5,24 +5,33 @@ Function-calling over the exact same detect_artifacts path /detect uses
 load, no HTTP round-trip to this app's own /detect route. Uses Groq's
 OpenAI-compatible chat completions API for tool calling.
 
-Conversation history is kept in-memory, per conversation_id, for this demo
-only -- no database. Same "simple, no persistence beyond what's needed"
-judgment already applied to the Supabase auth layer (steps_of_implementation_
-checkpoint2.md SS11): a chat demo doesn't need durable history to prove the
-tool-calling path works, and a restart clearing it is an acceptable tradeoff
-for what this checkpoint is actually demonstrating.
+Live conversation state (the exact message list the Groq tool-calling loop
+needs -- including in-flight tool_call_id bookkeeping) is still kept
+in-memory only, per conversation_id, for this process's lifetime -- that
+part hasn't changed, and a restart still clears it. What's new: every turn
+is *also* durably persisted to Supabase (chat_sessions/chat_messages, via
+storage/chat_storage.py) so a user can browse past sessions later
+(GET /chat/sessions, GET /chat/sessions/{id} in main.py). Past sessions are
+read-only -- they're never rehydrated back into `_conversations` for
+continuation, so the in-memory dict and the Supabase tables serve two
+different purposes rather than one replacing the other.
+
+Kept synchronous (not `async def`) throughout, including the new storage
+calls -- this is what lets FastAPI's default threadpool-offload keep the
+blocking Groq SDK calls and the CPU-bound run_detection path off the event
+loop, same as today. Converting this to async would put those directly on
+the loop instead, which is a real behavior change and out of scope here.
 """
 
 import json
 import logging
-import uuid
 
 from groq import Groq
 
 from . import storage
 from .config import settings
 from .detection import run_detection
-from .schemas import ChatResponse
+from .schemas import AuthedUser, ChatResponse
 
 logger = logging.getLogger("artifact-detector")
 
@@ -151,11 +160,20 @@ def _looks_like_malformed_tool_call(content: str | None) -> bool:
     return content is not None and "<function" in content
 
 
-def handle_chat_message(message: str, conversation_id: str | None) -> ChatResponse:
-    conv_id = conversation_id if conversation_id in _conversations else str(uuid.uuid4())
+def handle_chat_message(message: str, conversation_id: str | None, user: AuthedUser) -> ChatResponse:
+    is_new_conversation = conversation_id not in _conversations
+    if is_new_conversation:
+        # storage.create_session generates the durable session id -- that id
+        # *is* conv_id from here on (not a locally-generated uuid mapped to
+        # it separately), so the in-memory dict key and the Supabase row id
+        # are always the same value.
+        conv_id = storage.create_session(user.token, user.id, title=message[:80])
+    else:
+        conv_id = conversation_id
     history = _conversations.setdefault(conv_id, [{"role": "system", "content": SYSTEM_PROMPT}])
 
     history.append({"role": "user", "content": message})
+    storage.append_message(user.token, user.id, conv_id, role="user", content=message)
 
     response = _client.chat.completions.create(
         model=_MODEL, messages=history, tools=TOOLS, tool_choice="auto"
@@ -198,6 +216,16 @@ def handle_chat_message(message: str, conversation_id: str | None) -> ChatRespon
             history.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(tool_result)}
             )
+            storage.append_message(
+                user.token,
+                user.id,
+                conv_id,
+                role="tool",
+                content=None,
+                tool_name=tool_call.function.name,
+                tool_args=args,
+                tool_result=tool_result,
+            )
 
         followup = _client.chat.completions.create(model=_MODEL, messages=history)
         reply = followup.choices[0].message.content or ""
@@ -205,5 +233,6 @@ def handle_chat_message(message: str, conversation_id: str | None) -> ChatRespon
         reply = choice.content or ""
 
     history.append({"role": "assistant", "content": reply})
+    storage.append_message(user.token, user.id, conv_id, role="assistant", content=reply)
 
     return ChatResponse(reply=reply, detection_result=detection_result, conversation_id=conv_id)

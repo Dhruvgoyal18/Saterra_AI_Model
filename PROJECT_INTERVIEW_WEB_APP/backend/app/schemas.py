@@ -1,4 +1,23 @@
+from dataclasses import dataclass
+
 from pydantic import BaseModel
+
+
+@dataclass
+class AuthedUser:
+    """What main.py's require_user resolves a valid Supabase session down to.
+
+    Lives here, not in main.py, so both main.py and chat.py can import it
+    without a circular import (main.py imports chat as chat_module). `token`
+    is the raw bearer token itself -- needed alongside the user id so
+    chat.py/storage/chat_storage.py can forward it to Supabase's PostgREST
+    API, where it's what lets Row Level Security resolve auth.uid() to this
+    real user rather than the anon key's no-user-at-all identity.
+    """
+
+    id: str
+    token: str
+    raw: dict
 
 
 class ImageInfo(BaseModel):
@@ -66,3 +85,29 @@ class ChatResponse(BaseModel):
     # button's click handler uses.
     detection_result: DetectResponse | None = None
     conversation_id: str
+
+
+class ChatSessionSummary(BaseModel):
+    id: str
+    title: str | None
+    created_at: str
+    updated_at: str
+
+
+class ChatMessageRecord(BaseModel):
+    id: int
+    role: str
+    content: str | None
+    # Non-null only for a role="tool" row -- the tool actually invoked plus
+    # its arguments and raw result, stored durably so a past session's
+    # transcript can show exactly what ran, not just the assistant's prose
+    # summary of it (see chat.py's SYSTEM_PROMPT: "never claim a detection
+    # ran if the tool wasn't actually called").
+    tool_name: str | None = None
+    tool_args: dict | None = None
+    tool_result: dict | None = None
+    created_at: str
+
+
+class ChatSessionDetail(ChatSessionSummary):
+    messages: list[ChatMessageRecord]
