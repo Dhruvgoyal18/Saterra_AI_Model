@@ -584,3 +584,254 @@ canvas/summary components. The interesting engineering point here isn't the
 LLM call itself, it's that the tool boundary was designed to reuse the
 existing verified code path rather than becoming a second, divergent
 implementation.
+
+---
+
+## Checkpoint 2 cloud-inference split: deploying the model on Modal
+
+This section supersedes the in-process description above (`detect_artifacts`
+running inside the same process as the web backend) with what's actually
+deployed in production today. The web-serving/auth/storage-proxy layers
+described above are all unchanged; only *where the model runs* moved.
+
+### Why this exists at all
+
+Checkpoint 2's rubric line is specific: *"Model inference hosted in the
+cloud and image data stored in a cloud bucket; the local app reads images
+from the bucket and calls the hosted inference endpoint."* Before this work,
+image storage genuinely was a separate cloud bucket (the private HF dataset
+repo, described above) -- but model inference was **not** separately
+hosted. `detect_artifacts` ran `torch.load`/`model.eval()`/`model(batch)` in
+the same FastAPI process that served the web API. That's "the whole app is
+in the cloud," which is a different (weaker) claim than "the model is a
+separately-callable hosted endpoint," which is what the rubric asks for.
+The fix required standing up a second, independent service and having the
+backend call it over HTTP -- mirroring how the bucket call already worked.
+
+### The road here: three platforms, two failed outright
+
+**Attempt 1 -- Hugging Face Spaces (`Dhruvgoyal18` account).** Built
+`inference_service/` as a second FastAPI app (same `SmallCNN`,
+`detect_artifacts`, `estimate_tissue_mask`, `preprocessing` code, vendored a
+third time following this project's own "vendor across deploy boundaries"
+precedent), Dockerized it, pushed it as a new private Space
+(`saterra-model-inference`) via `HfApi().upload_folder(repo_type="space")`.
+The code was fully correct -- verified locally to reproduce the exact
+Checkpoint-1 baseline numbers for Image_6 (28.31% artifact frac, 1399
+regions, 6,250,496px largest region at `prob_threshold=0.5`). The Space
+itself never came up: it stayed `PAUSED` after the push, and calling
+`HfApi().restart_space(...)` returned a bare `401 Unauthorized` --
+the available token (an OAuth-derived `hf_oauth_...` token, not a
+classic Access-Token-Settings-page token) could push repo content and set
+Space secrets, but apparently lacked the separate permission needed to
+manage a Space's *compute/runtime* state via the API.
+
+**Attempt 2 -- Hugging Face Spaces, brand-new account (`mrcurious18`).**
+Same code, pushed to a fresh account with a token generated the normal way
+(Settings -> Access Tokens -> Write). This time `restart_space` didn't 401 --
+progress -- but returned `403 Forbidden: You've reached your cpu-basic
+quota limit`, on an account with **zero** other Spaces. Email verification
+didn't clear it; neither did waiting. Concluded this is a platform-level
+anti-abuse throttle on brand-new accounts that doesn't lift on any timeline
+controllable from here. Abandoned per explicit instruction ("if something
+breaks, be ready to reverse it back") -- all code changes reverted via `git
+checkout`, new files deleted, nothing was ever committed.
+
+**Render -- considered, not attempted.** This project's own deployment
+history (see the Render section further down / `steps_of_implementation_checkpoint2.md`
+S12.2) already answered this one: Render's free tier (~512MB RAM) OOM-killed
+the *full* backend decoding these same ~9000x9000 TIFFs, even after a real
+memory-usage fix landed. `inference_service` is leaner (no
+`huggingface_hub`/`opencv`/`Pillow`/`groq` in that version's deps), so it
+might have fared better, but Render also requires a git-based deploy (push
+to a connected repo) rather than a direct file-upload API, which didn't fit
+the "don't commit anything for this experiment" constraint in play at the
+time. Never actually tried; documented here as "ruled out, not tested,"
+which is an honest, different claim than "tried and failed."
+
+**Attempt 3 -- Modal. This one worked.** `modal deploy` builds and starts a
+function in one atomic call -- there's no separate "please wake up my
+already-pushed app" step that can lack permission, which is exactly the
+class of problem that killed both HF attempts. Deployment is CLI-driven
+from a local Python file, not git-based, satisfying the "no commits" rule
+Render couldn't. The user already had a Modal account with free credits.
+
+### Modal-specific problems hit, and how each was actually solved
+
+These were all real, not hypothetical -- each one blocked forward progress
+until diagnosed:
+
+1. **Windows console encoding crash.** `modal serve`/`deploy`'s Rich-based
+   CLI output tries to print a checkmark (`✓`); Windows' default
+   codepage (cp1252) can't encode it when stdout is redirected to a file
+   (as it was here, running headless through a tool harness). Fixed by
+   forcing `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1` in the environment before
+   invoking `modal`.
+
+2. **`modal serve modal_app.py` couldn't find the app object.** Modal's CLI
+   defaults to looking for a module-level variable literally named `app`.
+   The Modal `App` object here was deliberately named `modal_app` (to avoid
+   visual confusion with the *FastAPI* `app` object imported inside the
+   same function), so the CLI needed the explicit target:
+   `modal serve modal_app.py::modal_app`.
+
+3. **The big one: Modal's hard 150-second per-request timeout.** The
+   original design had the backend download the ~85MB DAPI TIFF from the HF
+   bucket and re-upload those same bytes as the `/predict` request body
+   (multipart file upload) to the Modal-hosted model. Modal enforces a hard
+   150s timeout on any single HTTP request to a hosted function
+   (`modal.asgi_app`/`fastapi_endpoint`/etc. all share this limit) --
+   confirmed against Modal's own docs, not just inferred from symptoms.
+   Measured directly: even a **10MB** synthetic upload didn't complete in
+   90-120 seconds, and this wasn't a client artifact -- reproduced
+   identically with `curl` (`Expect: 100-continue` disabled) and with a
+   from-scratch Python `httpx.post(..., content=data)` call, which hit a
+   `WriteTimeout`. Bisected with 1MB (30s), 10MB (>90s, no response) --
+   clearly not linear with plain network bandwidth, and independent of
+   whether the body was sent as multipart or a raw `application/octet-stream`
+   body (`request.body()` directly). Root cause: Modal's web-endpoint
+   ingress path just isn't built for large direct request-body uploads --
+   it's meant for typical small JSON-style request/response traffic, per
+   Modal's own recommended pattern for oversized payloads ("don't upload
+   it directly -- have the function fetch/reference the data, or use an
+   async job + polling pattern").
+   **Fix:** flipped who initiates the image fetch. Instead of
+   backend-fetches-then-forwards, the Modal-hosted `/predict` endpoint now
+   fetches the image *itself*, directly from the same private HF dataset
+   repo, via its own `hf_hub_download` call (needs its own `HF_TOKEN`/
+   `HF_DATASET_REPO`, provisioned as a second Modal secret,
+   `hf-bucket-secret`). The backend's request shrank from "85MB multipart
+   upload" to `POST /predict?image_id=Image_6&prob_threshold=0.7` -- a
+   few dozen bytes, regardless of how large the actual image is. This
+   incidentally reads as an even more literal match for the Checkpoint 2
+   wording: a genuinely separate, hosted service that reads from the bucket
+   on its own.
+
+### Final architecture: two Modal secrets, one function
+
+`inference_service/modal_app.py` defines one Modal `App` (`modal_app`,
+name `"saterra-model-inference"`) with one function
+(`fastapi_app`), decorated `@modal_app.function(secrets=[...]) @modal.asgi_app()`,
+that returns the existing `inference_service/app/main.py` FastAPI object
+unmodified in shape (same route names, same response schema) -- only its
+*internals* changed (fetch-by-id instead of receive-upload). The image is
+built via `modal.Image.debian_slim().pip_install(...)` +
+`.add_local_dir(app/, "/root/app", copy=True)`, which bakes the ~100KB model
+weights and all vendored code directly into the image at build time (no
+`modal.Volume` needed at this size). Two secrets:
+- `inference-secret` -> `INFERENCE_TOKEN`: a generated shared bearer secret
+  checked by `require_token()` in `inference_service/app/main.py` against
+  every `Authorization: Bearer` header. This is a second, app-level auth
+  layer independent of Modal's own platform auth.
+- `hf-bucket-secret` -> `HF_TOKEN` + `HF_DATASET_REPO`: the same dataset-repo
+  credentials the backend already holds, now also given to the Modal
+  service so it can fetch images on its own behalf.
+
+Deployed, permanent URL:
+`https://dhruvgoyal990--saterra-model-inference-fastapi-app.modal.run`.
+
+### Full request-flow map, end to end
+
+```
+Browser (React/Vite frontend)
+   |
+   | 1. GET /images/{id}/display  (Authorization: Bearer <Supabase JWT>)
+   v
+Backend (FastAPI, deployed as Dhruvgoyal18/saterra-ml-model HF Space,
+         or localhost:8010 in local dev)
+   |  - require_user(): validates the Supabase JWT against
+   |    GET {SUPABASE_URL}/auth/v1/user
+   |  - storage.get_display_image_path(): fetches/caches the original
+   |    .ome.tiff from the private HF dataset repo (Dhruvgoyal18/
+   |    saterra-project), downsamples it server-side, returns a PNG
+   v
+Browser renders the preview image on a <canvas>
+
+Browser
+   |
+   | 2. POST /detect  {"image_id": "Image_6"}
+   |    (Authorization: Bearer <Supabase JWT>)
+   v
+Backend  (app/detection.py: run_detection())
+   |  - require_user() gate (same as above)
+   |  - storage.validate_image_id(image_id): confirms it's a real file in
+   |    the HF dataset repo listing (cheap 404 short-circuit for bad ids --
+   |    preserves chat.py's graceful-decline behavior for LLM-invented ids)
+   |  - httpx.post(f"{INFERENCE_ENDPOINT_URL}/predict",
+   |               params={"image_id": ..., "prob_threshold": ...},
+   |               headers={"Authorization": f"Bearer {INFERENCE_SERVICE_TOKEN}"})
+   v
+Modal-hosted inference service (fastapi_app, saterra-model-inference)
+   |  - require_token(): checks the Authorization header against the
+   |    INFERENCE_TOKEN Modal secret (independent of Supabase auth --
+   |    this is service-to-service, the browser never sees this token)
+   |  - hf_hub_download(filename=f"{image_id}.ome.tiff",
+   |                     repo_id=HF_DATASET_REPO, token=HF_TOKEN)
+   |    -- fetches the real ~85MB original directly from the HF bucket,
+   |       using its OWN hf-bucket-secret credentials
+   |  - tifffile.TiffFile(...).asarray() -- decodes the full-res image
+   |  - estimate_tissue_mask(image) -- Otsu-on-log-block-mean, gates
+   |    background tiles out of inference
+   |  - detect_artifacts(image, weights_path, tissue_mask, ...):
+   |      - loads SmallCNN + model_final.pt (baked into the Modal image)
+   |      - tiles the image into 64x64 tiles, normalizes each via
+   |        1st/99th-percentile stats computed on the full image
+   |      - batches tiles through the model, torch.sigmoid() per tile
+   |      - builds a boolean artifact mask, intersects with tissue mask
+   |      - scipy.ndimage.label() for connected-component region stats
+   |  - returns JSON: {grid_shape, tile_confidence (nested list),
+   |                    summary {total_artifact_area_px,
+   |                             total_artifact_area_frac_of_tissue,
+   |                             num_connected_regions,
+   |                             largest_region_area_px,
+   |                             n_tiles_evaluated, n_tiles_total},
+   |                    level0_dims, tile_size}
+   v
+Backend
+   |  - wraps the JSON into DetectResponse(image_id=..., **payload)
+   |    (image_id is the only field the backend adds back -- everything
+   |    else is exactly what the Modal service computed)
+   v
+Browser
+   |  - DetectionCanvas.tsx paints the per-tile confidence grid as a
+   |    color-mapped overlay on top of the already-rendered display PNG
+   |  - SummaryPanel.tsx renders the summary block directly
+```
+
+For the `/chat` path, step 2 above is identical except the *trigger* is an
+LLM tool call (`run_artifact_detection`) instead of a button click --
+`chat.py`'s tool executor calls the exact same `run_detection()` function,
+so everything from `storage.validate_image_id` downward is byte-for-byte
+the same code path, same Modal round-trip, same response shape.
+
+### Verified, concretely, at every layer
+
+- Modal `/health` (no auth): `200 {"status": "ok"}`.
+- Modal `/predict` with a wrong/missing bearer token: `401` (fast, ~200ms --
+  proves the token check runs before any image fetch is attempted).
+- Modal `/predict?image_id=Image_6&prob_threshold=0.5` with the correct
+  token: exact baseline match, 28.31% frac / 1399 regions / 6,250,496px
+  largest region, ~29-31s per call (mix of cold-start + ~85MB HF download +
+  actual tiled inference over ~19,317 candidate tiles -- warm calls weren't
+  meaningfully faster, so the download+compute cost dominates over any
+  container cold-start cost here).
+- Backend `run_detection()` called in-process locally against the live
+  Modal URL: same numbers, now at the backend's actual configured
+  `prob_threshold=0.7` (12.51% frac / 917 regions / 802,816px largest).
+- Backend `/detect` over real HTTP with a real Supabase JWT, both locally
+  (`localhost:8010`) and against the redeployed **production** HF Space
+  (`Dhruvgoyal18/saterra-ml-model`): identical numbers.
+- Backend `/chat` with `"Please run artifact detection on Image_6..."`:
+  the LLM's natural-language reply correctly cites 12.51%/917 regions,
+  confirming the tool-calling path also round-trips through Modal correctly.
+
+### What's still in place, deliberately, for now
+
+The backend's old in-process `ml/{model,inference,tissue,preprocessing}.py`
++ `ml/weights/` files are still present and untouched -- kept as a rollback
+safety net, not yet deleted, per the same "be ready to reverse it back"
+instruction that governed the two abandoned HF attempts. Removing them
+(plus dropping `torch`/`scipy` from the backend's own `requirements.txt`,
+since only the Modal service needs them now) is the one remaining cleanup
+step, deferred until the Modal-backed path has been live long enough to
+trust fully.

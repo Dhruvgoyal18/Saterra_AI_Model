@@ -2,6 +2,7 @@ import type { Session } from "@supabase/supabase-js";
 import { useEffect, useState } from "react";
 import "./App.css";
 import { detectArtifacts, fetchDisplayImageObjectUrl, fetchImages } from "./api";
+import ChatHistoryPanel from "./ChatHistoryPanel";
 import ChatPanel from "./ChatPanel";
 import { DEFAULT_OVERLAY_COLOR, OVERLAY_COLOR_PALETTE, type OverlayColorName } from "./colormap";
 import DeepZoomCanvas from "./DeepZoomCanvas";
@@ -259,6 +260,8 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
           {detection && <SummaryPanel summary={detection.summary} />}
 
           <ChatPanel onDetectionResult={handleChatDetectionResult} />
+
+          <ChatHistoryPanel />
         </div>
       </div>
     </div>
