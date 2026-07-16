@@ -49,11 +49,6 @@ export default function ChatPanel({ onDetectionResult }: Props) {
   return (
     <div className="chat-panel">
       <div className="chat-title">Ask the assistant</div>
-      <p className="subtitle chat-hint">
-        e.g. "Run artifact detection on Image_7" -- results render in the canvas above, same as
-        clicking the button. Ask anything outside this dataset/tool and it will decline rather
-        than guess.
-      </p>
 
       <div className="chat-messages">
         {messages.length === 0 && <div className="chat-empty">No messages yet.</div>}

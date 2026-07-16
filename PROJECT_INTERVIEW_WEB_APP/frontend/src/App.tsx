@@ -141,11 +141,6 @@ function DetectorApp({ userEmail }: { userEmail: string }) {
 
       <header>
         <h1>DAPI Artifact Detector</h1>
-        <p className="subtitle">
-          Tile-classification model from Checkpoint 1, served from a private Hugging Face dataset
-          repo + cloud inference endpoint. The full-resolution image never reaches the browser --
-          only a downsampled display PNG and a small confidence grid do.
-        </p>
       </header>
 
       {imagesError && <div className="banner error">Failed to load image list: {imagesError}</div>}
