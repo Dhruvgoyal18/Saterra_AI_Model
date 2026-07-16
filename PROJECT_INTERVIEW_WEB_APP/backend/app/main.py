@@ -19,8 +19,19 @@ from fastapi.responses import FileResponse, Response
 from . import chat as chat_module
 from . import storage
 from .config import settings
-from .detection import run_detection
-from .schemas import ChatRequest, ChatResponse, DetectRequest, DetectResponse, ImageInfo, ImagesResponse
+from .detection import InferenceServiceError, run_detection
+from .schemas import (
+    AuthedUser,
+    ChatMessageRecord,
+    ChatRequest,
+    ChatResponse,
+    ChatSessionDetail,
+    ChatSessionSummary,
+    DetectRequest,
+    DetectResponse,
+    ImageInfo,
+    ImagesResponse,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("artifact-detector")
@@ -57,7 +68,7 @@ app.add_middleware(
 _http_client = httpx.AsyncClient(timeout=10.0)
 
 
-async def require_user(authorization: str | None = Header(None)) -> dict:
+async def require_user(authorization: str | None = Header(None)) -> AuthedUser:
     """Verify the Supabase-issued session token on every gated request.
 
     This is the actual access boundary, not the frontend's login screen --
@@ -82,7 +93,8 @@ async def require_user(authorization: str | None = Header(None)) -> dict:
         raise HTTPException(status_code=503, detail="Auth service temporarily unavailable -- try again") from exc
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-    return resp.json()
+    body = resp.json()
+    return AuthedUser(id=body["id"], token=token, raw=body)
 
 
 @app.get("/health")
@@ -166,14 +178,18 @@ def detect(request: DetectRequest) -> DetectResponse:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except storage.ImageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InferenceServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_user)])
-def chat(request: ChatRequest) -> ChatResponse:
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest, user: AuthedUser = Depends(require_user)) -> ChatResponse:
     """Checkpoint 3: natural-language trigger for the same run_detection path
     /detect uses, via Groq function-calling (see chat.py). Gated by the same
     require_user dependency as every other data-bearing route -- no new auth
-    model for this endpoint.
+    model for this endpoint. `user` is now captured (not just depended-on)
+    because chat.py persists each turn to Supabase on this user's behalf,
+    which needs both their id and their raw bearer token (see AuthedUser).
 
     storage.ImageNotFoundError/HFAuthError from a bad tool-call argument are
     deliberately NOT caught here -- chat.py's tool executor already turns
@@ -184,7 +200,38 @@ def chat(request: ChatRequest) -> ChatResponse:
     failure, not a user-input problem) gets a clean error here.
     """
     try:
-        return chat_module.handle_chat_message(request.message, request.conversation_id)
+        return chat_module.handle_chat_message(request.message, request.conversation_id, user)
     except Exception as exc:
         logger.exception("Chat completion failed")
         raise HTTPException(status_code=502, detail=f"Chat service temporarily unavailable: {exc}") from exc
+
+
+@app.get("/chat/sessions", response_model=list[ChatSessionSummary])
+def list_chat_sessions(user: AuthedUser = Depends(require_user)) -> list[ChatSessionSummary]:
+    """This user's past chat sessions, most-recently-active first -- for a
+    history list UI. Read-only: there is no way to resume one of these as a
+    live conversation, by design (see chat_storage.py)."""
+    try:
+        rows = storage.list_sessions(user.token, user.id)
+    except storage.ChatStorageError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not list chat sessions: {exc}") from exc
+    return [ChatSessionSummary(**row) for row in rows]
+
+
+@app.get("/chat/sessions/{session_id}", response_model=ChatSessionDetail)
+def get_chat_session(session_id: str, user: AuthedUser = Depends(require_user)) -> ChatSessionDetail:
+    """One past session's full transcript, including tool-call arguments and
+    raw results (not just the assistant's prose) -- see ChatMessageRecord."""
+    try:
+        data = storage.get_session_transcript(user.token, user.id, session_id)
+    except storage.SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except storage.ChatStorageError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not load chat session: {exc}") from exc
+    return ChatSessionDetail(
+        id=data["id"],
+        title=data["title"],
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        messages=[ChatMessageRecord(**m) for m in data["messages"]],
+    )

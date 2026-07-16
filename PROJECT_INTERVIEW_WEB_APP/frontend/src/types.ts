@@ -44,3 +44,28 @@ export interface ChatApiResponse {
   detection_result: DetectResponse | null;
   conversation_id: string;
 }
+
+// GET /chat/sessions -- one entry per past chat, most-recently-active first.
+export interface ChatSessionSummary {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// GET /chat/sessions/{id} -- one row of a past session's transcript.
+// tool_name/tool_args/tool_result are non-null only for a role="tool" row,
+// recording exactly what ran (not just the assistant's prose about it).
+export interface ChatMessageRecord {
+  id: number;
+  role: "user" | "assistant" | "tool";
+  content: string | null;
+  tool_name: string | null;
+  tool_args: Record<string, unknown> | null;
+  tool_result: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChatSessionDetail extends ChatSessionSummary {
+  messages: ChatMessageRecord[];
+}

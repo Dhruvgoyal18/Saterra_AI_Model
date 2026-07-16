@@ -25,6 +25,15 @@ def compute_classification_metrics(y_true: np.ndarray, y_prob: np.ndarray, thres
     }
 
 
+def sweep_thresholds(
+    y_true: np.ndarray, y_prob: np.ndarray, thresholds: np.ndarray = np.linspace(0.05, 0.95, 19)
+) -> list[dict]:
+    """Precision/recall/F1 at each candidate threshold, for picking a decision
+    threshold from real out-of-fold scores instead of guessing.
+    """
+    return [{"threshold": float(t), **compute_classification_metrics(y_true, y_prob, threshold=t)} for t in thresholds]
+
+
 def compute_iou(pred_mask: np.ndarray, true_mask: np.ndarray) -> float:
     """IoU between the stitched tile-prediction mask and the ground-truth
     artifact mask -- the metric that matches how an annotator actually thinks

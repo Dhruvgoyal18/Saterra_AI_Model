@@ -1,5 +1,11 @@
 import { supabase } from "./supabaseClient";
-import type { ChatApiResponse, DetectResponse, ImagesResponse } from "./types";
+import type {
+  ChatApiResponse,
+  ChatSessionDetail,
+  ChatSessionSummary,
+  DetectResponse,
+  ImagesResponse,
+} from "./types";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8010";
 
@@ -111,4 +117,27 @@ export async function sendChatMessage(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// This user's past chat sessions, most-recently-active first -- for a
+// history list UI. Cheap read, no cold-start risk, so no special timeout
+// unlike detectArtifacts/sendChatMessage above.
+export async function fetchChatSessions(): Promise<ChatSessionSummary[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE_URL}/chat/sessions`, { headers });
+  if (!res.ok) {
+    throw new Error(`Failed to list chat sessions: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+// One past session's full transcript, including tool-call arguments/results
+// -- read-only, there is no way to continue chatting into this session.
+export async function fetchChatSessionDetail(sessionId: string): Promise<ChatSessionDetail> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}`, { headers });
+  if (!res.ok) {
+    throw new Error(`Failed to load chat session: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
 }

@@ -33,5 +33,8 @@ PROJECT_INTERVIEW_WEB_APP/frontend/node_modules/
 PROJECT_INTERVIEW_WEB_APP/frontend/dist/
 PROJECT_INTERVIEW_WEB_APP/backend/.cache/
 PROJECT_INTERVIEW_WEB_APP/backend/.env
+PROJECT_INTERVIEW_WEB_APP/backend/mcp_server/certs/
 PROJECT_INTERVIEW_WEB_APP/frontend/.env
 PROJECT_INTERVIEW_WEB_APP/*.log
+
+.env

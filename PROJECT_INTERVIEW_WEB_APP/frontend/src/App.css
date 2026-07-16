@@ -282,3 +282,59 @@ header h1 {
   background: #555;
   cursor: not-allowed;
 }
+
+.chat-history-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-history-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #262626;
+  cursor: pointer;
+}
+
+.chat-history-item-title {
+  font-size: 0.85rem;
+  color: #e5e5e5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-history-item-date {
+  font-size: 0.72rem;
+  color: #9a9a9a;
+}
+
+.chat-history-back {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #9a9a9a;
+}
+
+.chat-history-tool {
+  font-size: 0.82rem;
+}
+
+.chat-history-tool-name {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.chat-history-tool-json {
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 2px 0;
+  color: #b5b5b5;
+}
