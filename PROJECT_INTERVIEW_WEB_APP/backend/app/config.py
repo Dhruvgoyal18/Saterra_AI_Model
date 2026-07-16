@@ -73,5 +73,15 @@ class Settings(BaseSettings):
     # f1 0.269->0.342 vs. the old 0.5 default); see artifacts/threshold_sweep_results.json.
     prob_threshold: float = 0.7
 
+    # Local MCP server (backend/mcp_server/) -- a separate process from this
+    # FastAPI app, exposed to Claude Desktop over SSE. Talks to this app over
+    # HTTP like any other client (see mcp_backend_base_url), reusing the same
+    # require_user auth boundary rather than importing detection/storage
+    # in-process. mcp_server_host is deliberately 127.0.0.1, not 0.0.0.0 --
+    # this is a local-only tool, never meant to be reachable off-machine.
+    mcp_backend_base_url: str = "http://127.0.0.1:8010"
+    mcp_server_host: str = "127.0.0.1"
+    mcp_server_port: int = 8931
+
 
 settings = Settings()

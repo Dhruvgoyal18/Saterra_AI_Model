@@ -13,3 +13,4 @@ torch
 Pillow
 opencv-python-headless
 groq
+mcp[cli]
