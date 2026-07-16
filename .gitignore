@@ -38,3 +38,8 @@ PROJECT_INTERVIEW_WEB_APP/frontend/.env
 PROJECT_INTERVIEW_WEB_APP/*.log
 
 .env
+Md files/
+PROJECT_INTERVIEW_WEB_APP/Web_App_MD_Files/
+.env.example
+PROJECT_INTERVIEW_WEB_APP/backend/.env.example
+PROJECT_INTERVIEW_WEB_APP/frontend/.env.example
