@@ -67,7 +67,11 @@ SYSTEM_PROMPT = (
     "never make up numbers. "
     "If a detection has already been run earlier in this conversation for the "
     "image being asked about, answer directly from that earlier result "
-    "instead of running the tool again."
+    "instead of running the tool again. "
+    "When reporting a detection result, answer only the specific metric(s) "
+    "the user asked about (e.g. just the percentage, or just the region "
+    "count) -- don't recite the full summary unless the user asked for an "
+    "overview/all the stats, or didn't specify which metric they wanted."
 )
 
 TOOLS = [
